@@ -1,9 +1,12 @@
 import React, { useState, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
 import {
   Link2, X, Sparkles, CheckCircle2, Circle, Eye, RefreshCw,
   Check, AlertTriangle, FileText, Calendar, Users, Key, Download
 } from 'lucide-react';
 import { api, profileStore, resumeStore } from '../lib/api';
+import { adminJobStore } from '../lib/adminJobStore';
+import { DEMO_JOBS } from '../lib/mockData';
 
 /* ── helpers ─────────────────────────────────────────────── */
 
@@ -145,6 +148,7 @@ function computeMatchScore(skillsMatch) {
 /* ── main component ──────────────────────────────────────── */
 
 export default function JobAnalyzerModal({ isOpen, onClose, initialUrl = '', onAccepted }) {
+  const navigate = useNavigate();
   const [step, setStep] = useState('input');         // 'input' | 'analyzing' | 'result' | 'error'
   const [jobUrl, setJobUrl] = useState(initialUrl);
   const [analysisStep, setAnalysisStep] = useState(0);
@@ -273,9 +277,37 @@ export default function JobAnalyzerModal({ isOpen, onClose, initialUrl = '', onA
         jobUrl: tailoredData.job?.applyUrl || tailoredData.job?.url || jobUrl,
       });
 
+      // Find or register the job in adminJobStore so Apply page can load it
+      const jobTitle = tailoredData.job?.title || 'Software Engineer';
+      const companyName = tailoredData.job?.company || 'Company';
+      const location = tailoredData.job?.location || 'Remote';
+      
+      const allJobs = [...adminJobStore.getWithFreshDates(), ...DEMO_JOBS];
+      let targetJob = allJobs.find(j => 
+        j.title?.toLowerCase().trim() === jobTitle.toLowerCase().trim() &&
+        j.company?.toLowerCase().trim() === companyName.toLowerCase().trim()
+      );
+
+      if (!targetJob) {
+        targetJob = adminJobStore.add({
+          title: jobTitle,
+          company: companyName,
+          companyLogoUrl: tailoredData.job?.logo || '',
+          location: location,
+          category: 'Freshers',
+          type: 'Full Time',
+          applyLink: tailoredData.job?.applyUrl || jobUrl,
+          skills: tailoredData.job?.keywords || ['Software Development'],
+          description: tailoredData.plainText || '',
+        });
+      }
+
       if (onAccepted) onAccepted();
       setIsSaving(false);
       onClose();
+
+      // Navigate to Apply page for this job
+      navigate(`/dashboard/apply/${targetJob.id}`);
     } catch (e) {
       console.error(e);
       setErrorMsg('Failed to save resume. Try again.');

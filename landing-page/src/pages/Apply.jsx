@@ -131,6 +131,14 @@ ${firstName}`;
   const [currentToneIndex, setCurrentToneIndex] = useState(0);
   const [isRewriting, setIsRewriting] = useState(false);
 
+  // Sync draft whenever active job changes
+  useEffect(() => {
+    if (job) {
+      setEmailSubject(`Application Referral Request: ${job.title} at ${job.company}`);
+      setEmailBody(generateInitialDraft());
+    }
+  }, [job?.id, job?.title, job?.company]);
+
   // Rewrite Message handler (AI tone switcher)
   const handleRewriteMessage = () => {
     setIsRewriting(true);
@@ -584,7 +592,10 @@ ${firstName}`;
               {employeesLoading ? (
                 <p style={{ fontSize: '13px', color: '#718096', margin: 0 }}>Loading employee contacts…</p>
               ) : employeeList.length === 0 ? (
-                <p style={{ fontSize: '14px', fontWeight: 700, color: '#718096', margin: 0 }}>Not present any other employee</p>
+                <div style={{ padding: '16px 20px', background: '#f8fafc', border: '1px dashed #cbd5e1', borderRadius: '12px', textAlign: 'center' }}>
+                  <p style={{ fontSize: '14px', fontWeight: 700, color: '#64748b', margin: 0 }}>No contact found</p>
+                  <span style={{ fontSize: '12px', color: '#94a3b8' }}>No target employee contacts exist for {job.company}. Ask admin to add employee contacts or use Direct Apply.</span>
+                </div>
               ) : null}
               {employeeList.map((emp) => (
                 <div 
@@ -727,9 +738,9 @@ ${firstName}`;
 
             <button
               onClick={handleConfirmAndSend}
-              disabled={sendingAll}
+              disabled={sendingAll || selectedEmployees.length === 0}
               style={{
-                background: '#18181b',
+                background: (sendingAll || selectedEmployees.length === 0) ? '#94a3b8' : '#18181b',
                 color: '#ffffff',
                 border: 'none',
                 borderRadius: '30px',
@@ -741,8 +752,9 @@ ${firstName}`;
                 display: 'flex',
                 alignItems: 'center',
                 gap: '10px',
-                cursor: 'pointer',
-                boxShadow: '0 8px 24px rgba(0,0,0,0.2)',
+                cursor: (sendingAll || selectedEmployees.length === 0) ? 'not-allowed' : 'pointer',
+                opacity: (sendingAll || selectedEmployees.length === 0) ? 0.6 : 1,
+                boxShadow: (sendingAll || selectedEmployees.length === 0) ? 'none' : '0 8px 24px rgba(0,0,0,0.2)',
                 transition: 'all 0.2s'
               }}
             >
