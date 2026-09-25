@@ -28,6 +28,10 @@ export const api = {
   // Gmail & MailMind AI
   triggerSync: () => apiFetch(MAILMIND_API, '/api/gmail/sync', { method: 'POST' }),
   getSyncStatus: () => apiFetch(MAILMIND_API, '/api/gmail/sync-status'),
+  summarizeMail: (mail) => apiFetch(MAILMIND_API, '/api/ai/mail/summarize', { method: 'POST', body: JSON.stringify(mail) }),
+  generateMailReply: (mail) => apiFetch(MAILMIND_API, '/api/ai/mail/reply', { method: 'POST', body: JSON.stringify(mail) }),
+  generateFollowUp: (mail) => apiFetch(MAILMIND_API, '/api/ai/mail/followup', { method: 'POST', body: JSON.stringify(mail) }),
+  sendFollowUp: (payload) => apiFetch(MAILMIND_API, '/api/ai/mail/followup/send', { method: 'POST', body: JSON.stringify(payload) }),
   getEmails: (page = 0, size = 20, category = '', mailbox = '', label = '') => {
     const params = new URLSearchParams({ page: String(page), size: String(size) });
     if (category) params.set('category', category);
@@ -77,7 +81,30 @@ export const api = {
   getGmailConfig: () => apiFetch('', '/api/config/gmail'),
   saveGmailConfig: (payload) => apiFetch('', '/api/config/gmail', { method: 'POST', body: JSON.stringify(payload) }),
   sendReferralEmail: (payload) => apiFetch('', '/api/send-email', { method: 'POST', body: JSON.stringify(payload) }),
+  getEmployees: (company = '') => apiFetch('', `/api/employees${company ? `?company=${encodeURIComponent(company)}` : ''}`),
+  addEmployee: (payload) => apiFetch('', '/api/employees', { method: 'POST', body: JSON.stringify(payload) }),
+  restoreEmployees: (employees) => apiFetch('', '/api/employees/bulk', { method: 'POST', body: JSON.stringify({ employees }) }),
+  deleteEmployee: (id) => apiFetch('', `/api/employees/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   getSentEmails: () => apiFetch('', '/api/sent-emails'),
+  tailorExternalJob: (payload) => apiFetch('', '/api/external-job/tailor', { method: 'POST', body: JSON.stringify(payload) }),
+};
+
+const EMPLOYEE_CACHE_KEY = 'hamzo_employees';
+
+export const employeeStore = {
+  getAll() {
+    try {
+      const raw = localStorage.getItem(EMPLOYEE_CACHE_KEY);
+      const list = raw ? JSON.parse(raw) : [];
+      return Array.isArray(list) ? list : [];
+    } catch {
+      return [];
+    }
+  },
+  saveAll(list) {
+    localStorage.setItem(EMPLOYEE_CACHE_KEY, JSON.stringify(list));
+    return list;
+  },
 };
 
 // Profile (localStorage)

@@ -8,7 +8,7 @@ import {
 } from 'lucide-react';
 import { DEMO_JOBS } from '../lib/mockData';
 import { adminJobStore } from '../lib/adminJobStore';
-import { profileStore, applicationStore, resumeStore, api } from '../lib/api';
+import { profileStore, applicationStore, resumeStore, api, employeeStore } from '../lib/api';
 import { calculateMatchScore } from '../lib/matchScore';
 
 const Linkedin = ({ size = 16, style = {} }) => (
@@ -51,47 +51,50 @@ export default function Apply() {
   // Auto-reply checkbox state
   const [autoReplyEnabled, setAutoReplyEnabled] = useState(true);
 
-  // Dynamic Company Employees (extracted from Admin PDF/database or generated for company)
-  const companyEmployees = useMemo(() => {
-    if (!job) return [];
-    const comp = job.company || 'Company';
-    const domain = comp.toLowerCase().replace(/[^a-z0-9]/g, '') + '.com';
-    return [
-      {
-        id: 'emp-1',
-        name: 'Priya Sharma',
-        role: `Technical Recruiter at ${comp}`,
-        email: `priya.sharma@${domain}`,
-        linkedin: `https://www.linkedin.com/search/results/people/?keywords=${encodeURIComponent(comp + ' Recruiter')}`,
-        avatarColor: '#008080',
-        selected: true
-      },
-      {
-        id: 'emp-2',
-        name: 'Rahul Verma',
-        role: `Engineering Lead / Hiring Manager at ${comp}`,
-        email: `rahul.v@${domain}`,
-        linkedin: `https://www.linkedin.com/search/results/people/?keywords=${encodeURIComponent(comp + ' Engineering Manager')}`,
-        avatarColor: '#2b6cb0',
-        selected: true
-      },
-      {
-        id: 'emp-3',
-        name: 'Ananya Roy',
-        role: `Senior Software Engineer at ${comp}`,
-        email: `ananya.roy@${domain}`,
-        linkedin: `https://www.linkedin.com/search/results/people/?keywords=${encodeURIComponent(comp + ' Senior Engineer')}`,
-        avatarColor: '#d69e2e',
-        selected: true
-      }
-    ];
-  }, [job]);
-
-  const [employeeList, setEmployeeList] = useState(companyEmployees);
+  const [employeeList, setEmployeeList] = useState([]);
+  const [employeesLoading, setEmployeesLoading] = useState(false);
 
   useEffect(() => {
-    setEmployeeList(companyEmployees);
-  }, [companyEmployees]);
+    if (!job?.company) {
+      setEmployeeList([]);
+      return;
+    }
+    let cancelled = false;
+    setEmployeesLoading(true);
+    const companyKey = (value) => String(value || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+    const sameCompany = (employeeCompany) => {
+      const left = companyKey(employeeCompany);
+      const right = companyKey(job.company);
+      return Boolean(left && right && (left === right || left.includes(right) || right.includes(left)));
+    };
+    api.getEmployees(job.company)
+      .then((rows) => {
+        if (cancelled) return;
+        const serverRows = Array.isArray(rows) ? rows : [];
+        const cached = employeeStore.getAll().filter((emp) => sameCompany(emp.company));
+        const merged = [...serverRows];
+        cached.forEach((emp) => {
+          if (!merged.some((row) => row.email === emp.email && sameCompany(row.company))) merged.push(emp);
+        });
+        const list = merged;
+        setEmployeeList(list.map((emp) => ({
+          ...emp,
+          selected: true,
+          role: emp.role && job.company && !emp.role.toLowerCase().includes(job.company.toLowerCase())
+            ? `${emp.role} at ${emp.company || job.company}`
+            : (emp.role || emp.company || ''),
+        })));
+      })
+      .catch(() => {
+        if (cancelled) return;
+        const cached = employeeStore.getAll().filter((emp) => sameCompany(emp.company));
+        setEmployeeList(cached.map((emp) => ({ ...emp, selected: true })));
+      })
+      .finally(() => {
+        if (!cancelled) setEmployeesLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [job?.company, job?.id]);
 
   const toggleEmployeeSelect = (id) => {
     setEmployeeList(prev => prev.map(e => e.id === id ? { ...e, selected: !e.selected } : e));
@@ -166,10 +169,10 @@ ${firstName}`;
 
     try {
       const payload = {
-        recipients: selectedEmployees.map(e => ({ name: e.name, email: e.email })),
+        recipients: selectedEmployees.map(e => ({ name: e.name, email: e.email, role: e.role })),
         subject: emailSubject,
         bodyText: emailBody,
-        senderEmail: profile.email || 'jaswanthnelluru2004@gmail.com',
+        senderEmail: profile.email || '',
         jobTitle: job?.title,
         company: job?.company
       };
@@ -199,7 +202,19 @@ ${firstName}`;
     } catch (err) {
       console.error('Error sending referral email:', err);
       setSendingAll(false);
-      const msg = typeof err === 'string' ? err : err?.message || 'Google Mail Connection Required: Please connect your Gmail account under Mail Automation first.';
+      const raw = typeof err === 'string' ? err : err?.message || '';
+      let msg = 'Connect Gmail on the Mail page, then send this referral again.';
+      const jsonStart = raw.indexOf('{');
+      if (jsonStart >= 0) {
+        try {
+          const data = JSON.parse(raw.slice(jsonStart));
+          msg = data.message || data.error || msg;
+        } catch {
+          msg = raw;
+        }
+      } else if (raw) {
+        msg = raw;
+      }
       setGmailAuthError(msg);
     }
   };
@@ -566,6 +581,11 @@ ${firstName}`;
             </p>
 
             <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+              {employeesLoading ? (
+                <p style={{ fontSize: '13px', color: '#718096', margin: 0 }}>Loading employee contacts…</p>
+              ) : employeeList.length === 0 ? (
+                <p style={{ fontSize: '14px', fontWeight: 700, color: '#718096', margin: 0 }}>Not present any other employee</p>
+              ) : null}
               {employeeList.map((emp) => (
                 <div 
                   key={emp.id}

@@ -70,6 +70,7 @@ export default function MailAutomation() {
   const [selectedCategory, setSelectedCategory] = useState('All');
   const [selectedThread, setSelectedThread] = useState(null);
   const [selectedSentEmail, setSelectedSentEmail] = useState(null);
+  const [aiPanel, setAiPanel] = useState(null);
 
   // Fetch data
   const loadRealData = async () => {
@@ -185,13 +186,62 @@ export default function MailAutomation() {
       await api.triggerSync();
       setFlashMsg('Sync initiated with Gmail API!');
       await loadRealData();
-    } catch {
-      setFlashMsg('Inbox synchronized successfully!');
+    } catch (err) {
+      setFlashMsg(err.message || 'Could not sync Gmail.');
     } finally {
       setTimeout(() => {
         setSyncing(false);
         setTimeout(() => setFlashMsg(''), 3000);
       }, 1200);
+    }
+  };
+
+  const mailContext = (mail) => ({
+    subject: mail.subject,
+    from: mail.senders?.[0]?.name || mail.senderName || '',
+    to: mail.senders?.[0]?.name || '',
+    email: mail.senders?.[0]?.email || mail.senderEmail || '',
+    body: mail.bodyText || mail.snippet || '',
+  });
+
+  const openAiPanel = async (event, mail, mode) => {
+    event.stopPropagation();
+    setAiPanel({ mode, mail, text: '', subject: mail.subject || '', loading: true, error: '' });
+    try {
+      const payload = mailContext(mail);
+      const res = mode === 'summary'
+        ? await api.summarizeMail(payload)
+        : mode === 'reply'
+          ? await api.generateMailReply(payload)
+          : await api.generateFollowUp(payload);
+      setAiPanel({
+        mode,
+        mail,
+        text: res.text || '',
+        subject: res.subject || (mode === 'followup' ? `Following up: ${mail.subject || ''}` : mail.subject || ''),
+        loading: false,
+        error: '',
+      });
+    } catch (err) {
+      setAiPanel({ mode, mail, text: '', subject: '', loading: false, error: err.message || 'Gemini could not complete that request.' });
+    }
+  };
+
+  const handleSendFollowUp = async () => {
+    if (!aiPanel?.mail || !aiPanel.text.trim()) return;
+    setAiPanel((prev) => ({ ...prev, sending: true, error: '' }));
+    try {
+      await api.sendFollowUp({
+        to: aiPanel.mail.senders?.[0]?.email || aiPanel.mail.senderEmail,
+        subject: aiPanel.subject,
+        body: aiPanel.text,
+      });
+      setAiPanel(null);
+      setFlashMsg('Follow-up email sent.');
+      setTimeout(() => setFlashMsg(''), 3000);
+      await loadRealData();
+    } catch (err) {
+      setAiPanel((prev) => ({ ...prev, sending: false, error: err.message || 'Could not send the follow-up.' }));
     }
   };
 
@@ -631,7 +681,9 @@ export default function MailAutomation() {
                         </div>
 
                         {/* Actions & Time */}
-                        <div className="flex items-center gap-3 shrink-0">
+                        <div className="flex items-center gap-2 shrink-0">
+                          <button className="btn-ghost sm" onClick={(e) => openAiPanel(e, thread, 'summary')}>Summarize</button>
+                          <button className="btn-ghost sm" onClick={(e) => openAiPanel(e, thread, 'reply')}>Generate reply</button>
                           <span className="text-xs text-gray-400 font-semibold">{formatTime(thread.receivedAt)}</span>
                           <button
                             onClick={(e) => handleToggleStar(e, thread.id)}
@@ -692,7 +744,9 @@ export default function MailAutomation() {
                     </div>
 
                     {/* Modal Footer */}
-                    <div className="p-4 border-t border-[#e2e2df] bg-[#fafaf7] flex justify-end">
+                    <div className="p-4 border-t border-[#e2e2df] bg-[#fafaf7] flex justify-end gap-2">
+                      <button className="btn-ghost text-xs" onClick={(e) => openAiPanel(e, selectedThread, 'summary')}>Summarize</button>
+                      <button className="btn-accent text-xs" onClick={(e) => openAiPanel(e, selectedThread, 'reply')}>Generate reply</button>
                       <button onClick={() => setSelectedThread(null)} className="btn-ghost text-xs">
                         Close Window
                       </button>
@@ -775,6 +829,7 @@ export default function MailAutomation() {
 
                         {/* Sent Timestamp */}
                         <div className="flex items-center gap-2 shrink-0">
+                          <button className="btn-ghost sm" onClick={(e) => openAiPanel(e, item, 'followup')}>Send follow-up</button>
                           <span className="text-xs text-gray-400 font-semibold">{formatTime(item.receivedAt || item.sentAt)}</span>
                         </div>
                       </div>
@@ -817,7 +872,8 @@ export default function MailAutomation() {
                     </div>
 
                     {/* Modal Footer */}
-                    <div className="p-4 border-t border-[#e2e2df] bg-[#fafaf7] flex justify-end">
+                    <div className="p-4 border-t border-[#e2e2df] bg-[#fafaf7] flex justify-end gap-2">
+                      <button className="btn-accent text-xs" onClick={(e) => openAiPanel(e, selectedSentEmail, 'followup')}>Send follow-up</button>
                       <button onClick={() => setSelectedSentEmail(null)} className="btn-ghost text-xs">
                         Close Window
                       </button>
@@ -827,6 +883,39 @@ export default function MailAutomation() {
               )}
             </>
           )}
+        </div>
+      )}
+
+      {aiPanel && (
+        <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-white border border-[#d9d9d2] rounded-2xl max-w-xl w-full p-5 shadow-2xl space-y-3">
+            <div className="flex items-center justify-between">
+              <h3 className="font-bold text-base">
+                {aiPanel.mode === 'summary' ? 'Summary' : aiPanel.mode === 'reply' ? 'Generated reply' : 'Follow-up message'}
+              </h3>
+              <button onClick={() => setAiPanel(null)} className="text-gray-400"><X size={18} /></button>
+            </div>
+            {aiPanel.loading ? (
+              <p className="text-sm text-gray-500">Gemini is writing this…</p>
+            ) : (
+              <textarea
+                value={aiPanel.text}
+                onChange={(e) => setAiPanel((prev) => ({ ...prev, text: e.target.value }))}
+                readOnly={aiPanel.mode === 'summary'}
+                rows={10}
+                className="w-full p-3 rounded-lg border border-[#d9d9d2] text-sm"
+              />
+            )}
+            {aiPanel.error && <p className="text-sm text-red-600">{aiPanel.error}</p>}
+            <div className="flex justify-end gap-2">
+              <button className="btn-ghost" onClick={() => setAiPanel(null)}>Close</button>
+              {aiPanel.mode === 'followup' && !aiPanel.loading && (
+                <button className="btn-accent" disabled={aiPanel.sending} onClick={handleSendFollowUp}>
+                  {aiPanel.sending ? 'Sending…' : 'Send follow-up'}
+                </button>
+              )}
+            </div>
+          </div>
         </div>
       )}
     </div>

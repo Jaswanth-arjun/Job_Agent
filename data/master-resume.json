@@ -1,0 +1,78 @@
+{
+  "name": "Nelluru Jaswanth",
+  "location": "Naidupeta, Tirupati District, Andhra Pradesh, India",
+  "phone": "+91 9440552825",
+  "email": "nellurujaswanth2004@gmail.com",
+  "linkedin": "https://www.linkedin.com/in/nelluru-jaswanth-a611ba2b3/",
+  "github": "https://github.com/Jaswanth-arjun",
+  "summary": "Computer Science undergraduate graduating in 2027 with strong foundations in Data Structures and Algorithms, OOP, DBMS, and software engineering. Hands-on experience developing full-stack applications and backend services using Java, Python, Spring Boot, REST APIs, SQL, and JavaScript. Experienced in feature development, API integration, debugging, testing, and maintaining application modules. Built AI-powered applications and automation workflows with Generative AI and AI Agents. Solved 500+ DSA problems with strong problem-solving and analytical skills.",
+  "skills": [
+    { "label": "Languages", "value": "Java, Python, C, JavaScript, SQL" },
+    { "label": "Core CS", "value": "Data Structures & Algorithms, OOP, DBMS, Software Engineering" },
+    { "label": "Backend", "value": "Spring Boot, REST APIs, API Integration, Backend Development" },
+    { "label": "Frontend", "value": "HTML5, CSS3, React.js" },
+    { "label": "Databases", "value": "MySQL, PostgreSQL, Supabase, SQL Querying" },
+    { "label": "AI & Automation", "value": "Generative AI, AI Agents, AI Automation, Prompt Engineering" },
+    { "label": "Testing", "value": "Unit, Functional, Regression, API Testing, Test Case Design, Debugging" },
+    { "label": "Tools & Practices", "value": "Git, GitHub, Postman, Agile/Scrum, Code Reviews, Version Control" }
+  ],
+  "internships": [
+    {
+      "title": "Java Full Stack Developer Intern",
+      "linkLabel": "Certificate",
+      "url": "https://drive.google.com/file/d/1R2L8WaXCiKrTEkuD9YKhIMKulcJtW7_V/view",
+      "dates": "Dec 2025 – Mar 2026",
+      "detail": "Developed full-stack features using Java, Spring Boot, REST APIs, and React.js. Implemented backend workflows and reusable components, integrated APIs, debugged application issues, and tested functionality to improve software reliability. Participated in code reviews and Git-based development workflows."
+    },
+    {
+      "title": "Full Stack Web Development Intern",
+      "linkLabel": "Certificate",
+      "url": "https://drive.google.com/file/d/1DMgwUtcQraCtaAPkNasmKVG-qNrHiBLv/view",
+      "dates": "Feb 2025 – May 2025",
+      "detail": "Developed and maintained web application features using REST APIs and database-driven workflows. Implemented functionality, created functional and regression test cases, debugged defects, and improved code quality through iterative testing and Agile development."
+    }
+  ],
+  "projects": [
+    {
+      "name": "Course Automation AI Agent",
+      "stack": "Python, Full Stack",
+      "linkLabel": "GitHub",
+      "url": "https://github.com/Jaswanth-arjun/Smart-Ai-Agents",
+      "detail": "Developed an AI-powered automation application that generates personalized course plans and automates scheduled email workflows. Implemented backend logic, AI API integration, scheduling, validation, error handling, and reusable automation workflows."
+    },
+    {
+      "name": "AI-Powered Food Safety & Hygiene Monitoring",
+      "stack": "Flutter",
+      "linkLabel": "GitHub",
+      "url": "https://github.com/Jaswanth-arjun/food_safety_app",
+      "detail": "Developed an AI-powered application with image-based analysis, backend workflows, API integration, and a reporting dashboard. Implemented features, created test cases, performed software testing and debugging, and improved application reliability."
+    },
+    {
+      "name": "Fee Queue Management System",
+      "stack": "Full Stack, PHP",
+      "linkLabel": "GitHub",
+      "url": "https://github.com/Jaswanth-arjun/college_fee_system",
+      "detail": "Developed a database-driven application for real-time token and queue management. Implemented SQL queries, database operations, application workflows, validation logic, and test cases to ensure data consistency."
+    }
+  ],
+  "education": [
+    {
+      "degree": "B.Tech in Computer Science and Engineering",
+      "school": "N.B.K.R. Institute of Science and Technology, Tirupati",
+      "dates": "2023 – 2027",
+      "detail": "CGPA: 7.5/10"
+    },
+    {
+      "degree": "Intermediate (10+2) — MPC",
+      "school": "V.B.R. Junior College, Nellore",
+      "dates": "2021 – 2023",
+      "detail": "Percentage: 96%"
+    }
+  ],
+  "extras": [
+    { "label": "Achievements", "value": "1st — Cybersecurity CTF Hackathon (2025); 2nd — Chatbot Buildathon; 4th — VaultSphere National Level Hackathon; Finalist — Meta AI Hackathon" },
+    { "label": "Problem Solving", "value": "500+ DSA problems solved across LeetCode, HackerRank, CodeChef, and CodeForces" },
+    { "label": "Leadership", "value": "AIESEC ConnectWorks Leadership Program (2025)" },
+    { "label": "Languages", "value": "English, Telugu, Hindi" }
+  ]
+}

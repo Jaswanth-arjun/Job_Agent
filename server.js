@@ -14,6 +14,10 @@ import { db } from './lib/db.js';
 import { handleRagChat } from './lib/rag-assistant.js';
 
 import nodemailer from 'nodemailer';
+import { GoogleGenerativeAI } from '@google/generative-ai';
+import { getDocumentProxy } from 'unpdf';
+import XLSX from 'xlsx';
+import { fillPageGaps, fitResumeToOnePage, mergeWithBaseline, renderResumePdf, resumePlainText } from './lib/resume-pdf.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -43,7 +47,7 @@ wss.on('error', () => {
 
 const PORT = process.env.PORT || 3000;
 
-app.use(express.json());
+app.use(express.json({ limit: '15mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
@@ -132,6 +136,319 @@ app.delete('/api/jobs/:id', (req, res) => {
   res.json({ message: 'Job deleted.' });
 });
 
+// ─── Company employees (admin form + PDF extract) ───
+const employeesFilePath = path.join(__dirname, 'data', 'employees.json');
+if (!fs.existsSync(employeesFilePath)) fs.writeFileSync(employeesFilePath, '[]', 'utf8');
+
+const employeesBackupPath = path.join(__dirname, 'data', 'employees.backup.json');
+
+function readEmployeeFile(filePath) {
+  try {
+    const list = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+    return Array.isArray(list) ? list : [];
+  } catch {
+    return [];
+  }
+}
+function readEmployees() {
+  const main = readEmployeeFile(employeesFilePath);
+  if (main.length) return main;
+  const backup = readEmployeeFile(employeesBackupPath);
+  if (backup.length) {
+    fs.writeFileSync(employeesFilePath, JSON.stringify(backup, null, 2), 'utf8');
+    return backup;
+  }
+  return main;
+}
+function writeEmployees(list) {
+  const json = JSON.stringify(list, null, 2);
+  fs.writeFileSync(employeesFilePath, json, 'utf8');
+  fs.writeFileSync(employeesBackupPath, json, 'utf8');
+}
+function normalizeCompany(value) {
+  return String(value || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+function companiesMatch(a, b) {
+  const x = normalizeCompany(a);
+  const y = normalizeCompany(b);
+  if (!x || !y) return false;
+  return x === y || x.includes(y) || y.includes(x);
+}
+
+const EMAIL_RE = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i;
+function findEmails(text) {
+  return String(text || '').match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi) || [];
+}
+const ROLE_HINT = /\b(recruiter|engineer|manager|lead|intern|director|developer|analyst|designer|founder|head|hr|talent|hiring|sde|software|consultant|architect|officer|executive|specialist)\b/i;
+
+function cleanField(value) {
+  return String(value || '').replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, '').replace(/[|,;]+/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+function parseEmployeesFromText(text, fallbackCompany = '') {
+  const rows = String(text || '').split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+  const found = [];
+  const seen = new Set();
+  let block = [];
+
+  const push = (partial) => {
+    const email = String(partial.email || '').toLowerCase();
+    if (!email || seen.has(email)) return;
+    seen.add(email);
+    found.push({
+      name: partial.name || email.split('@')[0].replace(/[._]/g, ' '),
+      role: partial.role || '',
+      email,
+      company: partial.company || fallbackCompany || '',
+      details: partial.details || '',
+    });
+  };
+
+  const consume = (row, emails) => {
+    const cells = row.split(/\s+\|\s+|[|,\t;]+/).map(cleanField).filter(Boolean);
+    const candidates = [...block.map(cleanField).filter(Boolean), ...cells];
+    emails.forEach((rawEmail) => {
+      const email = rawEmail.toLowerCase();
+      const own = candidates.filter((c) => !c.toLowerCase().includes(email));
+      const role = [...own].reverse().find((c) => ROLE_HINT.test(c)) || '';
+      let company = [...own].reverse().find((c) => c !== role && companiesMatch(c, fallbackCompany)) || '';
+      if (!company) {
+        company = [...own].reverse().find((c) => c !== role && !ROLE_HINT.test(c) && c.split(' ').length <= 4 && /(?:inc|ltd|pvt|llc|technologies|labs)\b/i.test(c)) || fallbackCompany || '';
+      }
+      const name = [...own].reverse().find((c) => c !== role && !companiesMatch(c, company) && !ROLE_HINT.test(c)) || '';
+      push({
+        name,
+        role,
+        email,
+        company: company || fallbackCompany,
+        details: [...block, row].filter(Boolean).join(' | '),
+      });
+    });
+    block = [];
+  };
+
+  rows.forEach((row) => {
+    const emails = findEmails(row);
+    if (!emails.length) {
+      block.push(row);
+      if (block.length > 8) block.shift();
+      return;
+    }
+    consume(row, emails);
+  });
+
+  return found;
+}
+
+async function pdfToRows(pdf) {
+  const rows = [];
+  for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber++) {
+    const page = await pdf.getPage(pageNumber);
+    const content = await page.getTextContent();
+    const grouped = new Map();
+    for (const item of content.items) {
+      const str = String(item.str || '').trim();
+      if (!str) continue;
+      const y = Math.round((item.transform?.[5] || 0) / 2) * 2;
+      const x = item.transform?.[4] || 0;
+      const key = `${pageNumber}:${y}`;
+      if (!grouped.has(key)) grouped.set(key, []);
+      grouped.get(key).push({ x, str });
+    }
+    const keys = [...grouped.keys()].sort((a, b) => {
+      const [pageA, yA] = a.split(':').map(Number);
+      const [pageB, yB] = b.split(':').map(Number);
+      if (pageA !== pageB) return pageA - pageB;
+      return yB - yA;
+    });
+    keys.forEach((key) => {
+      const line = grouped.get(key).sort((a, b) => a.x - b.x).map((part) => part.str).join(' | ');
+      if (line.trim()) rows.push(line.trim());
+    });
+  }
+  return rows.join('\n');
+}
+
+function saveEmployeeRecords(records, source) {
+  const all = readEmployees();
+  const saved = [];
+  for (const rec of records) {
+    if (!rec.email || !rec.name) continue;
+    const duplicate = all.find(e => e.email === rec.email && companiesMatch(e.company, rec.company));
+    if (duplicate) continue;
+    const row = {
+      id: crypto.randomUUID(),
+      name: rec.name,
+      company: rec.company || '',
+      role: rec.role || '',
+      email: rec.email,
+      details: rec.details || '',
+      source,
+      createdAt: new Date().toISOString(),
+    };
+    all.unshift(row);
+    saved.push(row);
+  }
+  writeEmployees(all);
+  return saved;
+}
+
+const LIST_FILE = /\.(pdf|xlsx|xls|csv)$/i;
+
+function columnValue(row, keys) {
+  for (const [key, value] of Object.entries(row)) {
+    const norm = String(key || '').toLowerCase().replace(/[^a-z]/g, '');
+    const text = String(value ?? '').trim();
+    if (!text) continue;
+    if (keys.some((hint) => norm === hint || norm.includes(hint))) return text;
+  }
+  return '';
+}
+
+function parseEmployeesFromSheetRows(rows, fallbackCompany = '') {
+  const found = [];
+  for (const row of rows) {
+    const email = columnValue(row, ['email', 'emailid', 'mail', 'emailaddress']).toLowerCase();
+    if (!email.includes('@')) continue;
+    const name = columnValue(row, ['name', 'fullname', 'employeename', 'contact']);
+    const role = columnValue(row, ['role', 'title', 'designation', 'position', 'jobtitle']);
+    const company = columnValue(row, ['company', 'companyname', 'organization', 'organisation']) || fallbackCompany;
+    const used = new Set(['email', 'emailid', 'mail', 'emailaddress', 'name', 'fullname', 'employeename', 'contact', 'role', 'title', 'designation', 'position', 'jobtitle', 'company', 'companyname', 'organization', 'organisation']);
+    const details = Object.entries(row)
+      .filter(([key, value]) => {
+        const norm = String(key).toLowerCase().replace(/[^a-z]/g, '');
+        return value != null && String(value).trim() && ![...used].some((hint) => norm === hint || norm.includes(hint));
+      })
+      .map(([key, value]) => `${key}: ${String(value).trim()}`)
+      .join(' | ');
+    found.push({
+      name: name || email.split('@')[0].replace(/[._]/g, ' '),
+      role,
+      email,
+      company,
+      details,
+    });
+  }
+  return found;
+}
+
+function parseEmployeesFromWorkbook(buffer, fallbackCompany) {
+  const workbook = XLSX.read(buffer, { type: 'buffer' });
+  const found = [];
+  for (const sheetName of workbook.SheetNames) {
+    const sheet = workbook.Sheets[sheetName];
+    const rows = XLSX.utils.sheet_to_json(sheet, { defval: '', raw: false });
+    const fromColumns = parseEmployeesFromSheetRows(rows, fallbackCompany);
+    if (fromColumns.length) {
+      found.push(...fromColumns);
+      continue;
+    }
+    const matrix = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '', raw: false });
+    const text = matrix.map((line) => (Array.isArray(line) ? line.join(' | ') : String(line))).join('\n');
+    found.push(...parseEmployeesFromText(text, fallbackCompany));
+  }
+  return found;
+}
+
+const uploadList = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 8 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    const ok = LIST_FILE.test(file.originalname || '');
+    cb(ok ? null : new Error('Upload a PDF or Excel file.'), ok);
+  },
+});
+
+app.get('/api/employees', (req, res) => {
+  const company = req.query.company;
+  const all = readEmployees();
+  const list = company ? all.filter(e => companiesMatch(e.company, company)) : all;
+  res.json(list);
+});
+
+app.post('/api/employees/bulk', (req, res) => {
+  const incoming = Array.isArray(req.body?.employees) ? req.body.employees : [];
+  const records = incoming.map((row) => ({
+    name: String(row.name || '').trim(),
+    company: String(row.company || '').trim(),
+    role: String(row.role || '').trim(),
+    email: String(row.email || '').trim().toLowerCase(),
+    details: String(row.details || '').trim(),
+  })).filter((row) => row.email && row.name);
+  saveEmployeeRecords(records, 'saved');
+  res.json({ employees: readEmployees() });
+});
+
+app.post('/api/employees', (req, res) => {
+  const { name, company, role, email, details } = req.body || {};
+  if (!name || !company || !role || !email) {
+    return res.status(400).json({ error: 'name, company, role, and email are required.' });
+  }
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(email).trim())) {
+    return res.status(400).json({ error: 'Enter a valid email address.' });
+  }
+  const saved = saveEmployeeRecords([{
+    name: String(name).trim(),
+    company: String(company).trim(),
+    role: String(role).trim(),
+    email: String(email).trim().toLowerCase(),
+    details: String(details || '').trim(),
+  }], 'manual');
+  if (!saved.length) return res.status(409).json({ error: 'This employee email is already saved for that company.' });
+  res.json({ employee: saved[0] });
+});
+
+app.post('/api/resume/extract-text', uploadList.single('file'), async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'Upload a resume PDF.' });
+  try {
+    if (!/\.pdf$/i.test(req.file.originalname || '')) return res.json({ text: '' });
+    const pdf = await getDocumentProxy(new Uint8Array(req.file.buffer));
+    const text = await pdfToRows(pdf);
+    res.json({ text: String(text || '').slice(0, 8000) });
+  } catch (err) {
+    res.status(500).json({ error: err.message || 'Could not read that resume.' });
+  }
+});
+
+app.post('/api/employees/upload-pdf', uploadList.single('file'), async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'Upload a PDF or Excel employee list.' });
+  try {
+    const fallbackCompany = String(req.body?.company || '').trim();
+    const filename = req.file.originalname || '';
+    let extracted = [];
+    let source = 'pdf';
+    if (/\.(xlsx|xls|csv)$/i.test(filename)) {
+      source = 'excel';
+      extracted = parseEmployeesFromWorkbook(req.file.buffer, fallbackCompany);
+    } else {
+      const pdf = await getDocumentProxy(new Uint8Array(req.file.buffer));
+      const text = await pdfToRows(pdf);
+      extracted = parseEmployeesFromText(text, fallbackCompany);
+    }
+    if (!extracted.length) {
+      return res.status(400).json({ error: 'No employee email addresses were found in that file.' });
+    }
+    const saved = saveEmployeeRecords(extracted, source);
+    res.json({
+      extracted: extracted.length,
+      saved: saved.length,
+      employees: saved,
+      skipped: extracted.length - saved.length,
+    });
+  } catch (err) {
+    console.error('Employee list extract failed:', err);
+    res.status(500).json({ error: 'Could not read that file. Use a PDF or Excel list with name, role, company, and email columns.' });
+  }
+});
+
+app.delete('/api/employees/:id', (req, res) => {
+  const all = readEmployees();
+  const next = all.filter(e => e.id !== req.params.id);
+  if (next.length === all.length) return res.status(404).json({ error: 'Employee not found.' });
+  writeEmployees(next);
+  res.json({ ok: true });
+});
+
 // ─── Google OAuth 2.0 Configuration & Storage ───
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '788869901191-d9d97on9eial7d2q8l6dbm0hngpsae8r.apps.googleusercontent.com';
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || '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';
@@ -198,6 +515,329 @@ async function fetchGoogleUserInfo(accessToken) {
   });
   return userRes.json();
 }
+
+function getGeminiKey() {
+  if (process.env.GEMINI_API_KEY) return process.env.GEMINI_API_KEY.trim();
+  const files = [path.join(__dirname, '.env'), path.join(__dirname, 'MailMind AI', '.env')];
+  for (const file of files) {
+    if (!fs.existsSync(file)) continue;
+    const match = fs.readFileSync(file, 'utf8').match(/^GEMINI_API_KEY=(.*)$/m);
+    if (match && match[1].trim() && !match[1].includes('your_gemini')) return match[1].trim();
+  }
+  return '';
+}
+
+async function askGemini(prompt) {
+  const apiKey = getGeminiKey();
+  if (!apiKey) throw new Error('Gemini API key is not configured.');
+  const genAI = new GoogleGenerativeAI(apiKey);
+  const models = ['gemini-3.8-flash', 'gemini-3.7-flash', 'gemini-3.6-flash', 'gemini-2.5-flash'];
+  let lastError = null;
+  for (const modelName of models) {
+    try {
+      const model = genAI.getGenerativeModel({ model: modelName });
+      const result = await model.generateContent(prompt);
+      const text = result.response.text();
+      if (text) return text.trim();
+    } catch (err) {
+      lastError = err;
+      console.warn(`Gemini model ${modelName} failed:`, String(err.message || err).slice(0, 180));
+    }
+  }
+  const detail = String(lastError?.message || '');
+  if (detail.includes('429')) throw new Error('Gemini is rate-limited right now. Wait a minute and try the job link again.');
+  if (detail.includes('503')) throw new Error('Gemini is busy right now. Try the job link again in a moment.');
+  throw new Error('Gemini could not generate a response. Try the job link again.');
+}
+
+function decodeGmailBody(payload) {
+  if (!payload) return '';
+  const decode = (data) => Buffer.from(String(data).replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8');
+  if (payload.body?.data) {
+    const text = decode(payload.body.data);
+    return payload.mimeType === 'text/html' ? text.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim() : text;
+  }
+  for (const part of payload.parts || []) {
+    const text = decodeGmailBody(part);
+    if (text) return text;
+  }
+  return '';
+}
+
+function gmailHeader(payload, name) {
+  return (payload?.headers || []).find((header) => header.name.toLowerCase() === name.toLowerCase())?.value || '';
+}
+
+function parseMailboxAddress(raw) {
+  const value = String(raw || '').trim();
+  const match = value.match(/^(.*)<([^>]+)>\s*$/);
+  if (!match) return { name: value || 'Unknown', email: value };
+  return { name: match[1].replace(/"/g, '').trim() || match[2].trim(), email: match[2].trim() };
+}
+
+function categorizeMail(subject, snippet) {
+  const text = `${subject} ${snippet}`.toLowerCase();
+  if (/interview|recruiter|hiring|job|application|referral|career|opening/.test(text)) return 'Job/Recruitment';
+  if (/newsletter|unsubscribe|digest|roundup/.test(text)) return 'Newsletters';
+  if (/notification|alert|security|no-reply|noreply|verification/.test(text)) return 'Notifications';
+  if (/meeting|project|invoice|update|follow/.test(text)) return 'Work/Professional';
+  return 'Uncategorized';
+}
+
+async function gmailApi(pathAndQuery) {
+  const token = await getValidAccessToken();
+  if (!token) {
+    const error = new Error('Connect Gmail on the Mail page first.');
+    error.status = 401;
+    throw error;
+  }
+  const res = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/${pathAndQuery}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    const error = new Error(data.error?.message || 'Gmail request failed.');
+    error.status = res.status;
+    throw error;
+  }
+  return data;
+}
+
+async function listMailbox(mailbox, size = 20) {
+  const query = mailbox === 'SENT' ? 'in:sent' : 'in:inbox';
+  const list = await gmailApi(`messages?maxResults=${Math.min(size, 30)}&q=${encodeURIComponent(query)}`);
+  const ids = list.messages || [];
+  const emails = [];
+  for (let i = 0; i < ids.length; i += 5) {
+    const chunk = ids.slice(i, i + 5);
+    const messages = await Promise.all(chunk.map((item) => gmailApi(`messages/${item.id}?format=full`)));
+    messages.forEach((message) => {
+      const payload = message.payload || {};
+      const subject = gmailHeader(payload, 'Subject') || '(No Subject)';
+      const from = parseMailboxAddress(gmailHeader(payload, 'From'));
+      const to = parseMailboxAddress(gmailHeader(payload, 'To'));
+      const person = mailbox === 'SENT' ? to : from;
+      const bodyText = decodeGmailBody(payload).slice(0, 8000);
+      const labels = message.labelIds || [];
+      emails.push({
+        id: message.id,
+        threadId: message.threadId,
+        subject,
+        snippet: message.snippet || '',
+        bodyText,
+        isRead: !labels.includes('UNREAD'),
+        isStarred: labels.includes('STARRED'),
+        aiCategory: categorizeMail(subject, message.snippet || ''),
+        receivedAt: new Date(Number(message.internalDate || Date.now())).toISOString(),
+        sentAt: new Date(Number(message.internalDate || Date.now())).toISOString(),
+        senders: [person],
+        senderName: person.name,
+        senderEmail: person.email,
+      });
+    });
+  }
+  return emails;
+}
+
+app.get('/api/emails', async (req, res) => {
+  try {
+    const mailbox = String(req.query.mailbox || 'INBOX').toUpperCase() === 'SENT' ? 'SENT' : 'INBOX';
+    const size = parseInt(req.query.size, 10) || 20;
+    const emails = await listMailbox(mailbox, size);
+    res.json({ emails, total: emails.length, mailbox });
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message || 'Could not load Gmail messages.' });
+  }
+});
+
+app.post('/api/gmail/sync', async (req, res) => {
+  try {
+    const [inbox, sent] = await Promise.all([listMailbox('INBOX', 20), listMailbox('SENT', 20)]);
+    res.json({ ok: true, received: inbox.length, sent: sent.length });
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message || 'Could not sync Gmail.' });
+  }
+});
+
+app.post('/api/ai/mail/summarize', async (req, res) => {
+  try {
+    const { subject, from, body } = req.body || {};
+    const text = await askGemini(`Summarize this received email in 4 short bullet points. Mention who it is from, what they want, and any deadline or next step.\nFrom: ${from || 'Unknown'}\nSubject: ${subject || ''}\n\n${String(body || '').slice(0, 6000)}`);
+    res.json({ text });
+  } catch (err) {
+    res.status(500).json({ error: err.message || 'Could not summarize this email.' });
+  }
+});
+
+app.post('/api/ai/mail/reply', async (req, res) => {
+  try {
+    const { subject, from, body } = req.body || {};
+    const text = await askGemini(`Write a polite, concise email reply the user can send. Do not invent facts that are not in the email. Keep it under 140 words.\nFrom: ${from || 'Unknown'}\nSubject: ${subject || ''}\n\n${String(body || '').slice(0, 6000)}`);
+    res.json({ text });
+  } catch (err) {
+    res.status(500).json({ error: err.message || 'Could not generate a reply.' });
+  }
+});
+
+app.post('/api/ai/mail/followup', async (req, res) => {
+  try {
+    const { subject, to, body } = req.body || {};
+    const text = await askGemini(`Write a short, polite follow-up email to someone the user already emailed. Reference the earlier message without repeating it. Keep it under 120 words.\nTo: ${to || 'there'}\nEarlier subject: ${subject || ''}\n\nEarlier message:\n${String(body || '').slice(0, 6000)}`);
+    res.json({ text, subject: subject?.toLowerCase().startsWith('follow') ? subject : `Following up: ${subject || 'my last email'}` });
+  } catch (err) {
+    res.status(500).json({ error: err.message || 'Could not write a follow-up.' });
+  }
+});
+
+app.post('/api/ai/mail/followup/send', async (req, res) => {
+  try {
+    const { to, subject, body } = req.body || {};
+    if (!to || !body) return res.status(400).json({ error: 'A recipient and message are required.' });
+    const tokens = readGmailTokens();
+    const fromEmail = tokens.email;
+    const accessToken = await getValidAccessToken();
+    if (!fromEmail || !accessToken) {
+      return res.status(401).json({ error: 'Connect Gmail on the Mail page before sending a follow-up.' });
+    }
+    const transporter = nodemailer.createTransport({
+      service: 'gmail',
+      auth: {
+        type: 'OAuth2',
+        user: fromEmail,
+        clientId: GOOGLE_CLIENT_ID,
+        clientSecret: GOOGLE_CLIENT_SECRET,
+        refreshToken: tokens.refresh_token,
+        accessToken,
+      },
+    });
+    const info = await transporter.sendMail({
+      from: `"${fromEmail.split('@')[0]}" <${fromEmail}>`,
+      to,
+      subject: subject || 'Following up',
+      text: body,
+    });
+    res.json({ ok: true, id: info.messageId });
+  } catch (err) {
+    res.status(500).json({ error: err.message || 'Could not send the follow-up.' });
+  }
+});
+
+function publicJobUrl(raw) {
+  const url = new URL(raw);
+  if (!['http:', 'https:'].includes(url.protocol)) return null;
+  const host = url.hostname.toLowerCase();
+  if (host === 'localhost' || host.endsWith('.local') || host === '127.0.0.1' || /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[0-1])\.)/.test(host)) return null;
+  return url;
+}
+
+function isJobErrorPage(pageUrl, html) {
+  let path = '';
+  try { path = new URL(pageUrl).pathname.toLowerCase(); } catch { path = ''; }
+  if (/\/error(\/|$)|\/500(\/|$)/.test(path)) return true;
+  const title = String(html || '').match(/<title>([^<]*)<\/title>/i)?.[1] || '';
+  return /server error|500 internal|page not found|access denied/i.test(title);
+}
+
+function extractApplyUrl(html, baseUrl) {
+  const hosts = /greenhouse\.io|lever\.co|myworkdayjobs\.com|ashbyhq\.com|smartrecruiters\.com|icims\.com|workable\.com|jobvite\.com|taleo\.net/;
+  const hrefs = [...String(html || '').matchAll(/href=["']([^"']+)["']/gi)].map((item) => item[1]);
+  const texts = [...String(html || '').matchAll(/https?:\/\/[^\s"'<>]+/gi)].map((item) => item[0]);
+  for (const href of [...hrefs, ...texts]) {
+    try {
+      const next = new URL(href, baseUrl).toString();
+      if (hosts.test(next) && !/\/error(\/|$)|\/500(\/|$)/i.test(next)) return next;
+    } catch {}
+  }
+  return '';
+}
+
+async function fetchJobText(url) {
+  const res = await fetch(url, {
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+      Accept: 'text/html,application/xhtml+xml',
+      'Accept-Language': 'en-US,en;q=0.9',
+    },
+    redirect: 'follow',
+    signal: AbortSignal.timeout(15000),
+  });
+  const html = await res.text();
+  if (!res.ok || isJobErrorPage(res.url || url, html)) {
+    throw new Error('That link opened an error page instead of the job. Paste the job posting address from the browser address bar.');
+  }
+  const text = html
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 12000);
+  return { text, openUrl: url, applyUrl: extractApplyUrl(html, res.url || url) };
+}
+
+function loadMasterResume() {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(__dirname, 'data', 'master-resume.json'), 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+function resumeTextIsUsable(text) {
+  const value = String(text || '');
+  return value.length > 500 && /intern|education|project|skill/i.test(value);
+}
+
+app.post('/api/external-job/tailor', async (req, res) => {
+  try {
+    const { url, profile, resumeText } = req.body || {};
+    const jobUrl = publicJobUrl(url);
+    if (!jobUrl) return res.status(400).json({ error: 'Enter a public job link.' });
+    const fetched = await fetchJobText(jobUrl.toString());
+    const jobText = fetched.text;
+    const openUrl = fetched.applyUrl || jobUrl.toString();
+    const master = loadMasterResume();
+    const supplied = String(resumeText || '');
+    const sourceResume = resumeTextIsUsable(supplied)
+      ? supplied.slice(0, 7000)
+      : [supplied, master ? resumePlainText({}, master) : ''].filter(Boolean).join('\n').slice(0, 7000);
+    const prompt = `Tailor this candidate's real resume to the job. Return only JSON.
+Keep every real internship, project, school, and achievement. Rephrase the summary so it leads with the job title and the candidate's real stack. Put the skills that match the job first. Do not delete sections. Do not invent employers, schools, projects, dates, or links.
+The summary must be 90 to 120 words. Do not use markdown, asterisks, or **bold**. Plain text only.
+JSON keys: title, company, keywords, removedKeywords, addedKeywords, name, location, phone, email, linkedin, github, summary, skills, internships, projects, education, extras.
+skills items: {label, value}. internships items: {title, linkLabel, url, dates, detail}. projects items: {name, stack, linkLabel, url, detail}. education items: {degree, school, dates, detail}. extras items: {label, value}.
+Candidate profile: ${JSON.stringify(profile || {}).slice(0, 4000)}
+Full resume: ${sourceResume}
+Job page text: ${jobText.slice(0, 6000)}`;
+    const raw = await askGemini(prompt);
+    const parsed = JSON.parse(raw.slice(raw.indexOf('{'), raw.lastIndexOf('}') + 1));
+    const fitted = await fillPageGaps(mergeWithBaseline(
+      fitResumeToOnePage(parsed, profile || {}),
+      fitResumeToOnePage(master || {}, profile || {}),
+      { title: parsed.title || '', company: parsed.company || '' },
+    ), [...(parsed.keywords || []), parsed.title, parsed.company].filter(Boolean));
+    const safeProfile = profile || {};
+    const formats = [
+      { id: 'recommended', name: 'Recommended one page', style: 'recommended' },
+      { id: 'modern', name: 'Modern sections', style: 'modern' },
+      { id: 'compact', name: 'Compact one page', style: 'compact' },
+    ];
+    for (const format of formats) {
+      format.pdfBase64 = await renderResumePdf(safeProfile, fitted, format.style);
+    }
+    res.json({
+      job: { url: openUrl, sourceUrl: jobUrl.toString(), applyUrl: fetched.applyUrl || openUrl, title: parsed.title || '', company: parsed.company || '', keywords: parsed.keywords || [] },
+      removedKeywords: parsed.removedKeywords || [],
+      addedKeywords: parsed.addedKeywords || [],
+      plainText: resumePlainText(safeProfile, fitted),
+      formats,
+      recommendedId: 'recommended',
+    });
+  } catch (err) {
+    console.error('External resume tailor failed:', err);
+    res.status(500).json({ error: err.message || 'Could not tailor a resume for that job link.' });
+  }
+});
 
 // ─── Google Sign-In (identity only — does NOT connect Gmail) ───
 app.get('/api/auth/google-url', (req, res) => {
@@ -349,7 +989,8 @@ app.post('/api/send-email', async (req, res) => {
 
   const tokens = readGmailTokens();
   const gmailPass = process.env.GMAIL_APP_PASS;
-  const targetEmail = senderEmail || tokens.email || process.env.GMAIL_USER || 'jaswanthnelluru2004@gmail.com';
+  const connectedGmail = tokens.connected && tokens.refresh_token ? tokens.email : '';
+  const targetEmail = connectedGmail || senderEmail || process.env.GMAIL_USER || '';
 
   if (!recipients || !Array.isArray(recipients) || recipients.length === 0) {
     return res.status(400).json({ error: 'Recipients array is required.' });
@@ -358,21 +999,27 @@ app.post('/api/send-email', async (req, res) => {
   try {
     let transporter;
 
-    if (tokens && tokens.refresh_token) {
-      // 1. Send via Google OAuth 2.0 Authorized Account (Full Access)
+    if (connectedGmail) {
       const accessToken = await getValidAccessToken();
+      if (!accessToken) {
+        return res.status(401).json({
+          requireGmailAuth: true,
+          error: 'Invalid Gmail Credentials',
+          message: 'Gmail needs to be connected again. Open Mail and click Connect, then send this referral.'
+        });
+      }
       transporter = nodemailer.createTransport({
         service: 'gmail',
         auth: {
           type: 'OAuth2',
-          user: targetEmail,
+          user: connectedGmail,
           clientId: GOOGLE_CLIENT_ID,
           clientSecret: GOOGLE_CLIENT_SECRET,
           refreshToken: tokens.refresh_token,
-          accessToken: accessToken,
+          accessToken,
         }
       });
-    } else if (gmailPass) {
+    } else if (gmailPass && targetEmail) {
       // 2. Send via Gmail App Password
       transporter = nodemailer.createTransport({
         host: 'smtp.gmail.com',
@@ -398,15 +1045,22 @@ app.post('/api/send-email', async (req, res) => {
       const recipientName = recipient.name || 'Hiring Manager';
       const recipientEmail = recipient.email;
 
-      const personalizedBody = (bodyText || '')
-        .replace(/\{\{outreachEmployeeName\}\}/g, recipientName.split(' ')[0])
+      const firstName = recipientName.split(' ')[0];
+      const roleLabel = recipient.role || '';
+      const fill = (value) => String(value || '')
+        .replace(/\{\{outreachEmployeeName\}\}/g, firstName)
+        .replace(/\{\{outreachEmployeeRole\}\}/g, roleLabel)
+        .replace(/\{\{outreachEmployeeEmail\}\}/g, recipientEmail || '')
         .replace(/\{\{companyName\}\}/g, company || '')
         .replace(/\{\{jobTitle\}\}/g, jobTitle || '');
+
+      const personalizedBody = fill(bodyText);
+      const personalizedSubject = fill(subject) || `Application Referral Request for ${jobTitle || 'Role'} at ${company || 'Company'}`;
 
       const mailOptions = {
         from: `"${targetEmail.split('@')[0]}" <${targetEmail}>`,
         to: recipientEmail,
-        subject: subject || `Application Referral Request for ${jobTitle || 'Role'} at ${company || 'Company'}`,
+        subject: personalizedSubject,
         text: personalizedBody,
         html: `<div style="font-family: Arial, sans-serif; font-size: 14px; line-height: 1.6; color: #111;">
           ${personalizedBody.replace(/\n/g, '<br/>')}
@@ -424,7 +1078,7 @@ app.post('/api/send-email', async (req, res) => {
         recipient: recipientEmail,
         recipientName,
         sender: targetEmail,
-        subject: subject || `Application Referral Request: ${jobTitle} at ${company}`,
+        subject: personalizedSubject,
         bodyText: personalizedBody,
         jobTitle: jobTitle || '',
         company: company || '',

@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Plus, Trash2, Edit3, Upload, X, Eye, Briefcase, Building, MapPin, Clock, Link2, Image, FileText, ChevronDown } from 'lucide-react';
 import { adminJobStore } from '../lib/adminJobStore';
+import AdminEmployees from '../components/AdminEmployees';
 
 const CATEGORY_OPTIONS = ['Freshers', 'Confidential', 'Remote', 'Full time Permanent Position'];
 
@@ -371,6 +372,8 @@ export default function AdminJobs() {
           </div>
         )}
       </section>
+
+      <AdminEmployees />
     </div>
   );
 }
