@@ -5,11 +5,21 @@ node_modules/
 .chrome-data/
 .chrome-data-tracker/
 linkdin-automation/
+sessions/
+uploads/
+
+# Build & Sensitive Data
+dist/
+build/
+data/gmail_tokens.json
+data/sent_emails.json
 
 # Environment files
 .env
 .env.local
+*.env
 
 # Logs
 *.log
 npm-debug.log*
+
