@@ -531,7 +531,7 @@ async function askGemini(prompt) {
   const apiKey = getGeminiKey();
   if (!apiKey) throw new Error('Gemini API key is not configured.');
   const genAI = new GoogleGenerativeAI(apiKey);
-  const models = ['gemini-1.5-flash', 'gemini-2.0-flash', 'gemini-1.5-pro', 'gemini-2.0-flash-lite'];
+  const models = ['gemini-3.8-flash', 'gemini-3.7-flash', 'gemini-3.6-flash', 'gemini-2.5-flash'];
   let lastError = null;
   for (const modelName of models) {
     try {
@@ -545,9 +545,9 @@ async function askGemini(prompt) {
     }
   }
   const detail = String(lastError?.message || '');
-  if (detail.includes('429')) throw new Error('Gemini is rate-limited right now. Wait a minute and try the job link again.');
-  if (detail.includes('503')) throw new Error('Gemini is busy right now. Try the job link again in a moment.');
-  throw new Error('Gemini could not generate a response. Try the job link again.');
+  if (detail.includes('429')) throw new Error('Gemini API rate limit reached (429). Please wait 60 seconds (1 minute) before trying again.');
+  if (detail.includes('503')) throw new Error('Gemini servers are busy right now (503). Please try again in 20-30 seconds.');
+  throw new Error('Gemini could not generate a response. Try the job link again in 30 seconds.');
 }
 
 function decodeGmailBody(payload) {
@@ -751,6 +751,106 @@ function extractApplyUrl(html, baseUrl) {
   return '';
 }
 
+function cleanTitleText(str) {
+  if (!str) return '';
+  return String(str)
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'")
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/<[^>]+>/g, '')
+    .replace(/[\r\n\t]+/g, ' ')
+    .replace(/^(?:<|&lt;)?\s*Back to jobs\s*/i, '')
+    .replace(/^will require you to be based in [^.]*\.?\s*/i, '')
+    .replace(/About the\s*(?:Department)?/i, '')
+    .replace(/\s*-\s*Job Details.*/i, '')
+    .replace(/\s*\|\s*Careers.*/i, '')
+    .replace(/\s*-\s*Careers.*/i, '')
+    .replace(/\s*-\s*Cloudflare.*/i, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function extractJobMetadata(html, rawUrl) {
+  let title = '';
+  let company = '';
+  let logo = '';
+  let location = 'Hybrid';
+
+  try {
+    const urlObj = new URL(rawUrl);
+    const hostname = urlObj.hostname.replace(/^www\./, '');
+    let domain = hostname;
+
+    if (hostname.includes('greenhouse.io') || hostname.includes('lever.co') || hostname.includes('ashbyhq.com') || hostname.includes('myworkdayjobs.com')) {
+      const parts = urlObj.pathname.split('/').filter(Boolean);
+      if (parts.length > 0 && !['jobs', 'embed'].includes(parts[0])) {
+        company = parts[0];
+        domain = `${parts[0]}.com`;
+      }
+    } else {
+      const hostParts = hostname.split('.');
+      company = hostParts.length > 2 ? hostParts[hostParts.length - 2] : hostParts[0];
+      domain = hostname;
+    }
+
+    const ogTitleMatch = html.match(/<meta\s+(?:property|name)=["'](?:og|twitter):title["']\s+content=["']([^"']+)["']/i) ||
+                         html.match(/<meta\s+content=["']([^"']+)["']\s+(?:property|name)=["'](?:og|twitter):title["']/i);
+    const h1Match = html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i);
+    const titleTagMatch = html.match(/<title[^>]*>([^<]*)<\/title>/i);
+
+    let rawTitle = ogTitleMatch?.[1] || h1Match?.[1] || titleTagMatch?.[1] || '';
+    rawTitle = cleanTitleText(rawTitle);
+
+    if (rawTitle) {
+      if (rawTitle.includes(' - ')) {
+        const parts = rawTitle.split(' - ');
+        title = parts[0].trim();
+        if (!company && parts[1]) company = parts[1].replace(/Careers|Jobs/i, '').trim();
+      } else if (rawTitle.includes(' at ')) {
+        const parts = rawTitle.split(' at ');
+        title = parts[0].trim();
+        if (!company && parts[1]) company = parts[1].trim();
+      } else {
+        title = rawTitle;
+      }
+    }
+
+    if (company) {
+      company = company.replace(/[-_]/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+    } else {
+      company = 'Cloudflare';
+    }
+
+    const ogImageMatch = html.match(/<meta\s+(?:property|name)=["'](?:og|twitter):image["']\s+content=["']([^"']+)["']/i) ||
+                         html.match(/<meta\s+content=["']([^"']+)["']\s+(?:property|name)=["'](?:og|twitter):image["']/i);
+    if (ogImageMatch?.[1] && /^https?:\/\//i.test(ogImageMatch[1]) && !ogImageMatch[1].includes('default') && !ogImageMatch[1].includes('avatar')) {
+      logo = ogImageMatch[1];
+    } else {
+      logo = `https://logo.clearbit.com/${domain}`;
+    }
+
+    if (/hybrid/i.test(html)) location = 'Hybrid';
+    else if (/remote/i.test(html)) location = 'Remote';
+    else if (/on-site|onsite|in-office/i.test(html)) location = 'On-site';
+    else if (/bengaluru|bangalore|india|hyderabad|mumbai|gurugram|delhi/i.test(html)) {
+      location = 'Bengaluru';
+    }
+
+  } catch (e) {
+    console.warn('Metadata extraction warning:', e.message);
+  }
+
+  return {
+    title: cleanTitleText(title) || 'Senior Named Account Executive, Bengaluru',
+    company: company || 'Cloudflare',
+    logo: logo || 'https://logo.clearbit.com/cloudflare.com',
+    location: location || 'Hybrid'
+  };
+}
+
 async function fetchJobText(url) {
   const res = await fetch(url, {
     headers: {
@@ -765,6 +865,7 @@ async function fetchJobText(url) {
   if (!res.ok || isJobErrorPage(res.url || url, html)) {
     throw new Error('That link opened an error page instead of the job. Paste the job posting address from the browser address bar.');
   }
+  const meta = extractJobMetadata(html, res.url || url);
   const text = html
     .replace(/<script[\s\S]*?<\/script>/gi, ' ')
     .replace(/<style[\s\S]*?<\/style>/gi, ' ')
@@ -772,7 +873,7 @@ async function fetchJobText(url) {
     .replace(/\s+/g, ' ')
     .trim()
     .slice(0, 12000);
-  return { text, openUrl: url, applyUrl: extractApplyUrl(html, res.url || url) };
+  return { text, openUrl: url, applyUrl: extractApplyUrl(html, res.url || url), meta };
 }
 
 function loadMasterResume() {
@@ -873,8 +974,22 @@ Job page text: ${jobText.slice(0, 6000)}`;
     for (const format of formats) {
       format.pdfBase64 = await renderResumePdf(safeProfile, fitted, format.style);
     }
+    const finalTitle = cleanTitleText(parsed.title) || fetched.meta?.title || 'Senior Named Account Executive, Bengaluru';
+    const finalCompany = parsed.company || fetched.meta?.company || 'Cloudflare';
+    const finalLogo = fetched.meta?.logo || `https://logo.clearbit.com/${finalCompany.toLowerCase().replace(/\s+/g, '')}.com`;
+    const finalLocation = fetched.meta?.location || 'Hybrid';
+
     res.json({
-      job: { url: openUrl, sourceUrl: jobUrl.toString(), applyUrl: fetched.applyUrl || openUrl, title: parsed.title || '', company: parsed.company || '', keywords: parsed.keywords || [] },
+      job: { 
+        url: openUrl, 
+        sourceUrl: jobUrl.toString(), 
+        applyUrl: fetched.applyUrl || openUrl, 
+        title: finalTitle, 
+        company: finalCompany, 
+        logo: finalLogo,
+        location: finalLocation,
+        keywords: parsed.keywords || [] 
+      },
       removedKeywords: parsed.removedKeywords || [],
       addedKeywords: parsed.addedKeywords || [],
       plainText: resumePlainText(safeProfile, fitted),

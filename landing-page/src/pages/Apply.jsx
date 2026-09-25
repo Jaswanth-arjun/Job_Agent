@@ -301,17 +301,20 @@ ${firstName}`;
         }}
       >
         <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
-          {job.companyLogoUrl ? (
+          {Boolean(job.companyLogoUrl || job.logo || job.company) && (
             <img 
-              src={job.companyLogoUrl} 
+              src={job.companyLogoUrl || job.logo || `https://logo.clearbit.com/${(job.company||'').toLowerCase().replace(/[^a-z0-9]/g, '')}.com`} 
               alt={job.company} 
-              style={{ width: '56px', height: '56px', borderRadius: '14px', objectFit: 'cover', background: '#fff', padding: '2px' }} 
+              onError={(e) => {
+                e.target.style.display = 'none';
+                if (e.target.nextSibling) e.target.nextSibling.style.display = 'flex';
+              }}
+              style={{ width: '56px', height: '56px', borderRadius: '14px', objectFit: 'contain', background: '#ffffff', padding: '6px' }} 
             />
-          ) : (
-            <div style={{ width: '56px', height: '56px', borderRadius: '14px', background: '#445cf5', color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: '800', fontSize: '22px' }}>
-              {job.company?.[0] || '?'}
-            </div>
           )}
+          <div style={{ width: '56px', height: '56px', borderRadius: '14px', background: '#445cf5', color: '#fff', display: (job.companyLogoUrl || job.logo) ? 'none' : 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: '800', fontSize: '22px' }}>
+            {job.company?.[0] || '?'}
+          </div>
           <div>
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px' }}>
               <span style={{ background: '#445cf5', color: '#fff', fontSize: '10px', fontWeight: '800', padding: '2px 8px', borderRadius: '12px', textTransform: 'uppercase' }}>
