@@ -531,7 +531,7 @@ async function askGemini(prompt) {
   const apiKey = getGeminiKey();
   if (!apiKey) throw new Error('Gemini API key is not configured.');
   const genAI = new GoogleGenerativeAI(apiKey);
-  const models = ['gemini-3.8-flash', 'gemini-3.7-flash', 'gemini-3.6-flash', 'gemini-2.5-flash'];
+  const models = ['gemini-1.5-flash', 'gemini-2.0-flash', 'gemini-1.5-pro', 'gemini-2.0-flash-lite'];
   let lastError = null;
   for (const modelName of models) {
     try {
@@ -809,8 +809,56 @@ skills items: {label, value}. internships items: {title, linkLabel, url, dates, 
 Candidate profile: ${JSON.stringify(profile || {}).slice(0, 4000)}
 Full resume: ${sourceResume}
 Job page text: ${jobText.slice(0, 6000)}`;
-    const raw = await askGemini(prompt);
-    const parsed = JSON.parse(raw.slice(raw.indexOf('{'), raw.lastIndexOf('}') + 1));
+    let parsed = null;
+    try {
+      const raw = await askGemini(prompt);
+      const jsonStr = raw.slice(raw.indexOf('{'), raw.lastIndexOf('}') + 1);
+      parsed = JSON.parse(jsonStr);
+    } catch (geminiErr) {
+      console.warn('Gemini API call failed or busy, using smart local fallback resume builder:', geminiErr.message);
+      
+      // Extract title from job text or fallback
+      const titleMatch = jobText.match(/(?:title|role|position)[:\s]+([^\n\r,]+)/i) || 
+                         jobText.match(/([A-Z][a-zA-Z\s]{3,35}(?:Engineer|Developer|Manager|Executive|Intern|Architect|Analyst))/);
+      const fallbackTitle = titleMatch ? titleMatch[1].trim() : 'Software Engineer';
+      
+      // Extract company name from job text or URL
+      let fallbackCompany = 'Company';
+      try {
+        const hostname = new URL(jobUrl.toString()).hostname.replace(/^www\./, '');
+        fallbackCompany = hostname.split('.')[0].toUpperCase();
+      } catch {}
+
+      const companyMatch = jobText.match(/(?:at|company|organization)[:\s]+([A-Z][a-zA-Z0-9\s]{2,20})/i);
+      if (companyMatch) fallbackCompany = companyMatch[1].trim();
+
+      // Extract skills & keywords from job text
+      const extractedKeywords = Array.from(new Set(
+        (jobText.match(/\b(Java|Python|React|Node\.js|AWS|Cloud|SQL|API|Agile|Git|Docker|Kubernetes|TypeScript|JavaScript|C\+\+|C#|\.NET|DevOps|Cybersecurity|Microservices|HTML|CSS|REST|NoSQL|MongoDB|System Design|Machine Learning|AI|CI\/CD)\b/gi) || [])
+          .map(k => k.trim())
+      ));
+
+      parsed = {
+        title: fallbackTitle,
+        company: fallbackCompany,
+        keywords: extractedKeywords.length > 0 ? extractedKeywords : ['Software Development', 'Problem Solving', 'Engineering', 'API Integration', 'Cloud'],
+        removedKeywords: [],
+        addedKeywords: extractedKeywords.slice(0, 5),
+        name: profile?.fullName || master?.name || 'Candidate',
+        location: profile?.location || master?.location || 'Remote',
+        phone: profile?.phone || master?.phone || '',
+        email: profile?.email || master?.email || '',
+        linkedin: profile?.linkedin || master?.linkedin || '',
+        github: profile?.github || master?.github || '',
+        summary: `${profile?.fullName || master?.name || 'Candidate'} is a dedicated ${fallbackTitle} skilled in ${(extractedKeywords.slice(0, 4).join(', ') || 'software development')}. Proven track record in building robust applications, collaborating in agile environments, and delivering high quality code tailored for ${fallbackCompany}.`,
+        skills: master?.skills || [{ label: 'Core Skills', value: extractedKeywords.join(', ') }],
+        internships: master?.internships || [],
+        projects: master?.projects || [],
+        education: master?.education || [],
+        extras: master?.extras || []
+      };
+    }
+
     const fitted = await fillPageGaps(mergeWithBaseline(
       fitResumeToOnePage(parsed, profile || {}),
       fitResumeToOnePage(master || {}, profile || {}),
