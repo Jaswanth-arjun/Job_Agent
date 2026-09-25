@@ -117,6 +117,46 @@ export default function ResumeManager() {
     window.postMessage({ source: 'hamzo-app', type: 'HAMZO_SAVE_PROFILE', profile, answers: savedAnswers() }, '*');
   };
 
+  /** Map Profile.jsx field names to the resume backend format */
+  const mapProfileForBackend = (profile) => {
+    const mapped = { ...profile };
+    // Map education: institution→school, graduationYear→dates, branch appended to degree
+    if (profile.education?.length) {
+      mapped.education = profile.education.map((e) => ({
+        degree: [e.degree, e.branch].filter(Boolean).join(' in '),
+        school: e.institution || e.school || '',
+        dates: e.graduationYear || e.dates || '',
+        detail: e.cgpa ? `CGPA: ${e.cgpa}` : (e.detail || ''),
+      }));
+    }
+    // Map experience: duration→dates, description→detail
+    if (profile.experience?.length) {
+      mapped.experience = profile.experience.map((e) => ({
+        title: e.title || '',
+        company: e.company || '',
+        dates: e.duration || e.dates || '',
+        description: e.description || '',
+        detail: e.description || e.detail || '',
+      }));
+    }
+    // Map projects: title→name, technologies→stack, link→url, description→detail
+    if (profile.projects?.length) {
+      mapped.projects = profile.projects.map((p) => ({
+        name: p.title || p.name || '',
+        stack: p.technologies || p.stack || '',
+        url: p.link || p.url || '',
+        detail: p.description || p.detail || '',
+        linkLabel: (p.link || p.url) ? 'GitHub' : '',
+      }));
+    }
+    // Map links
+    if (profile.links) {
+      if (!mapped.linkedin && profile.links.linkedin) mapped.linkedin = profile.links.linkedin;
+      if (!mapped.github && profile.links.github) mapped.github = profile.links.github;
+    }
+    return mapped;
+  };
+
   const handleJobLink = async () => {
     setError('');
     setStatus('');
@@ -124,6 +164,7 @@ export default function ResumeManager() {
       setError('Paste the job link first.');
       return;
     }
+    const profile = profileStore.get() || {};
     const url = jobLink.trim();
     setApplyUrl(url);
     setLinkOpen(false);
@@ -131,17 +172,17 @@ export default function ResumeManager() {
     extensionInstalled().then((ready) => { if (ready) pushProfileToExtension(); });
     setStatus('Reading the job and tailoring a one-page resume…');
     try {
-      const profile = profileStore.get() || {};
+      const mappedProfile = mapProfileForBackend(profile);
       const active = resumes.find((item) => item.isActive) || resumes[0];
       const profileResume = [
         profile.skills?.length ? `Skills: ${profile.skills.join(', ')}` : '',
-        ...(profile.experience || []).map((item) => [item.title, item.company, item.dates, ...(item.bullets || item.description ? [item.description] : [])].filter(Boolean).join(' ')),
-        ...(profile.education || []).map((item) => [item.degree, item.school, item.dates].filter(Boolean).join(' ')),
-        ...(profile.projects || []).map((item) => [item.name, item.description || item.detail].filter(Boolean).join(' ')),
+        ...(mappedProfile.experience || []).map((item) => [item.title, item.company, item.dates, item.description].filter(Boolean).join(' ')),
+        ...(mappedProfile.education || []).map((item) => [item.degree, item.school, item.dates, item.detail].filter(Boolean).join(' ')),
+        ...(mappedProfile.projects || []).map((item) => [item.name, item.stack, item.detail].filter(Boolean).join(' ')),
       ].filter(Boolean).join('\n');
       const result = await api.tailorExternalJob({
         url,
-        profile,
+        profile: mappedProfile,
         resumeText: [active?.text, profileResume].filter(Boolean).join('\n').slice(0, 8000),
       });
       setTailored(result);
@@ -174,22 +215,14 @@ export default function ResumeManager() {
       setError('That job address is an error page. Paste the Apply page URL from the address bar.');
       return;
     }
-    const profile = {
-      ...(profileStore.get() || {}),
-      education: (profileStore.get()?.education?.length ? profileStore.get().education : [
-        { school: 'N.B.K.R. Institute of Science and Technology, Tirupati', degree: 'B.Tech in Computer Science and Engineering', dates: '2023 – 2027', gpa: '7.5/10' },
-      ]),
-      internships: profileStore.get()?.experience?.length ? profileStore.get().experience : [
-        { title: 'Java Full Stack Developer Intern', dates: 'Dec 2025 – Mar 2026' },
-        { title: 'Full Stack Web Development Intern', dates: 'Feb 2025 – May 2025' },
-      ],
-    };
+    const rawProfile = profileStore.get() || {};
+    const profile = mapProfileForBackend(rawProfile);
+    if (!profile.fullName) {
+      const active = resumes.find((item) => item.isActive) || resumes[0];
+      profile.fullName = active?.name?.replace(/\.[^/.]+$/, '') || 'Candidate';
+    }
     if (!profile.links) profile.links = {};
-    if (!profile.links.linkedin) profile.links.linkedin = profile.linkedin || 'https://www.linkedin.com/in/nelluru-jaswanth-a611ba2b3/';
-    if (!profile.fullName) profile.fullName = 'Nelluru Jaswanth';
-    if (!profile.email) profile.email = 'nellurujaswanth2004@gmail.com';
-    if (!profile.phone) profile.phone = '+91 9440552825';
-    if (!profile.location) profile.location = 'Naidupeta, Tirupati District, Andhra Pradesh, India';
+    if (!profile.links.linkedin && profile.linkedin) profile.links.linkedin = profile.linkedin;
     const chosen = tailored.formats.find((item) => item.id === formatId) || tailored.formats[0];
     if (!chosen?.pdfBase64) {
       setError('The tailored PDF is missing. Tailor the job link again, then Accept.');
