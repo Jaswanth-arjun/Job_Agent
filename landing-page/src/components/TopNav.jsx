@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { NavLink, useNavigate } from 'react-router-dom';
 import { LayoutDashboard, Briefcase, User, FileText, FolderOpen, Mail, LogOut, Menu, HelpCircle, Bell, PlusCircle } from 'lucide-react';
 import { useAuth } from '../lib/auth';
-import { profileStore } from '../lib/api';
+import { profileStore, getUserName } from '../lib/api';
 import PawLogo from './PawLogo';
 
 const LinkedinIcon = ({ size = 18 }) => (
@@ -28,7 +28,7 @@ export default function TopNav({ onMenu }) {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
 
-  const name = user?.displayName || user?.email || 'U';
+  const name = getUserName(user);
   const initials = name.split(/[\s@.]+/).filter(Boolean).map(w => w[0]).join('').slice(0, 2).toUpperCase();
 
   // Profile completion percentage calculation

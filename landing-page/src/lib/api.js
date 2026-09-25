@@ -120,6 +120,34 @@ export const profileStore = {
   },
 };
 
+export function getUserName(user, profile) {
+  const savedProfile = profile !== undefined ? profile : profileStore.get();
+  if (savedProfile?.fullName && savedProfile.fullName.trim()) {
+    return savedProfile.fullName.trim();
+  }
+
+  if (user?.displayName) {
+    const dName = user.displayName.trim();
+    const isEmailHandle = user.email && (dName === user.email || dName === user.email.split('@')[0] || (/^[a-z0-9._-]+$/i.test(dName) && /\d+/.test(dName)));
+    if (!isEmailHandle && !dName.includes('@')) {
+      return dName;
+    }
+  }
+
+  const handle = user?.displayName || user?.email?.split('@')[0] || savedProfile?.email?.split('@')[0] || '';
+  if (handle) {
+    const rawParts = handle.replace(/\d+/g, '').split(/[._-]+/).filter(Boolean);
+    const validParts = rawParts.filter(p => p.length > 2 || rawParts.length === 1);
+    const partsToUse = validParts.length > 0 ? validParts : rawParts;
+    if (partsToUse.length > 0) {
+      return partsToUse.map(p => p.charAt(0).toUpperCase() + p.slice(1).toLowerCase()).join(' ');
+    }
+  }
+
+  return 'User';
+}
+
+
 // Resume (localStorage)
 export const resumeStore = {
   getAll() {

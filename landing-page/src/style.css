@@ -323,8 +323,90 @@ nav.sidebar-nav{position:static;top:auto;left:auto;right:auto;transform:none;wid
 nav.mobile-nav{top:auto;bottom:0;height:auto;min-height:0;transform:none;width:auto;border:0;border-radius:0;box-shadow:none}
 
 /* Dashboard hero banner */
-.dash-hero{background:linear-gradient(160deg,#3cbdd2 0%,#22a3cf 100%);border-radius:20px;padding:40px 40px 36px;margin-bottom:36px;color:#fff}
+.dash-hero{background:linear-gradient(115deg, #e8944a 0%, #f27259 50%, #ea580c 100%);border-radius:20px;padding:40px 40px 36px;margin-bottom:28px;color:#fff}
 .dash-hero h1{font-size:clamp(30px,4vw,44px);font-weight:800;letter-spacing:-.04em;margin:0}
+
+/* Quick action cards below welcome banner */
+.dash-quick-actions {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 18px;
+  margin-bottom: 36px;
+}
+.quick-action-card {
+  background: #ffffff;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  padding: 18px 22px;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  cursor: pointer;
+  transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.02);
+}
+.quick-action-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 10px 26px rgba(0, 0, 0, 0.06);
+  border-color: #cbd5e1;
+}
+.qa-icon-wrap {
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.qa-blue {
+  background: #eef2ff;
+  color: #4f46e5;
+}
+.qa-green {
+  background: #dcfce7;
+  color: #16a34a;
+}
+.qa-purple {
+  background: #f3e8ff;
+  color: #9333ea;
+}
+.qa-content {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.qa-title {
+  font-size: 15px;
+  font-weight: 800;
+  color: var(--ink);
+  line-height: 1.25;
+  margin-bottom: 3px;
+  letter-spacing: -0.01em;
+}
+.qa-subtitle {
+  font-size: 12px;
+  color: var(--muted);
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.qa-arrow {
+  color: #94a3b8;
+  flex-shrink: 0;
+  transition: transform 0.18s ease, color 0.18s ease;
+}
+.quick-action-card:hover .qa-arrow {
+  color: var(--ink);
+  transform: translateX(3px);
+}
+@media (max-width: 850px) {
+  .dash-quick-actions {
+    grid-template-columns: 1fr;
+  }
+}
 .hero-card{background:#fff;border-radius:16px;padding:24px;color:var(--ink);box-shadow:0 20px 50px rgba(0,0,0,.12)}
 .hero-card-head{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:20px;flex-wrap:wrap}
 .hero-card-title{display:flex;align-items:center;gap:10px;font-size:19px;font-weight:800;letter-spacing:-.03em}

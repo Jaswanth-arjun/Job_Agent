@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Save, Plus, X, Edit3, FileText, Upload, Trash2, Eye } from 'lucide-react';
 import { useAuth } from '../lib/auth';
-import { profileStore } from '../lib/api';
+import { profileStore, getUserName } from '../lib/api';
 import { DEFAULT_PROFILE } from '../lib/mockData';
 
 // Standalone ProfileField component declared outside of Profile to prevent unmounting & focus loss
@@ -25,7 +25,7 @@ export default function Profile() {
   const [editing, setEditing] = useState(false);
   const [profile, setProfile] = useState(() => {
     const saved = profileStore.get();
-    return saved || { ...DEFAULT_PROFILE, fullName: user?.displayName || '', email: user?.email || '' };
+    return saved || { ...DEFAULT_PROFILE, fullName: getUserName(user), email: user?.email || '' };
   });
   const [skillInput, setSkillInput] = useState('');
   const [saved, setSaved] = useState(false);

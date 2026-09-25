@@ -2,6 +2,7 @@ import React, { useEffect, useState, useRef } from 'react';
 import { Upload, FileText, Trash2, CheckCircle, Clock, Plus, X } from 'lucide-react';
 import EmptyState from '../components/EmptyState';
 import { resumeStore, profileStore, api } from '../lib/api';
+import JobAnalyzerModal from '../components/JobAnalyzerModal';
 
 const ANSWERS_KEY = 'hamzo_apply_answers';
 
@@ -329,32 +330,11 @@ export default function ResumeManager() {
       {status && <p style={{ marginTop: 16, color: '#047857', fontWeight: 700 }}>{status}</p>}
       {error && <p style={{ marginTop: 16, color: '#b91c1c', fontWeight: 700 }}>{error}</p>}
 
-      {linkOpen && (
-        <Dialog title="Add job link" onClose={() => setLinkOpen(false)}>
-          <p style={{ margin: '0 0 16px', fontSize: 14, lineHeight: 1.55, color: '#555852' }}>
-            Paste a job that is not already on the Hamzo dashboard. Hamzo will read it and tailor your resume to one page.
-          </p>
-          <form
-            onSubmit={(event) => {
-              event.preventDefault();
-              handleJobLink();
-            }}
-          >
-            <input
-              value={jobLink}
-              onChange={(e) => setJobLink(e.target.value)}
-              placeholder="https://company.com/jobs/..."
-              autoFocus
-              style={{ width: '100%', boxSizing: 'border-box', padding: '12px 14px', borderRadius: 10, border: '1px solid #d9d9d2', fontSize: 14, marginBottom: error ? 8 : 16, background: '#fafaf8' }}
-            />
-            {error && <p style={{ margin: '0 0 14px', color: '#b91c1c', fontSize: 13, fontWeight: 700 }}>{error}</p>}
-            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
-              <button type="button" className="btn-ghost" onClick={() => setLinkOpen(false)}>Cancel</button>
-              <button type="submit" className="btn-accent">Continue</button>
-            </div>
-          </form>
-        </Dialog>
-      )}
+      <JobAnalyzerModal
+        isOpen={linkOpen}
+        onClose={() => setLinkOpen(false)}
+        onAccepted={() => setResumes(resumeStore.getAll())}
+      />
 
       {extensionPrompt && (
         <Dialog title="Add the Hamzo extension first" onClose={() => setExtensionPrompt(false)}>

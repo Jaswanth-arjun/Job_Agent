@@ -2,6 +2,7 @@ import React from 'react';
 import { NavLink, useNavigate } from 'react-router-dom';
 import { LayoutDashboard, Briefcase, User, FileText, FolderOpen, Mail, LogOut, X, Share2 } from 'lucide-react';
 import { useAuth } from '../lib/auth';
+import { profileStore, getUserName } from '../lib/api';
 import PawLogo from './PawLogo';
 
 const LinkedinIcon = ({ size = 18 }) => (
@@ -25,6 +26,8 @@ const navItems = [
 export default function Sidebar({ open, onClose }) {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
+
+  const name = getUserName(user);
 
   const handleLogout = () => {
     logout();
@@ -62,13 +65,13 @@ export default function Sidebar({ open, onClose }) {
         <div className="sidebar-user">
           <div className="sidebar-user-avatar">
             {user?.avatarUrl ? (
-              <img src={user.avatarUrl} alt={user.displayName} />
+              <img src={user.avatarUrl} alt={name} />
             ) : (
-              <span>{(user?.displayName || user?.email || 'U')[0].toUpperCase()}</span>
+              <span>{(name || 'U')[0].toUpperCase()}</span>
             )}
           </div>
           <div className="sidebar-user-info">
-            <strong>{user?.displayName || 'User'}</strong>
+            <strong>{name}</strong>
             <small>{user?.email || ''}</small>
           </div>
           <button className="sidebar-logout" onClick={handleLogout} title="Sign out">
