@@ -10,13 +10,14 @@
     {
       "matches": ["http://localhost:5173/*", "http://127.0.0.1:5173/*"],
       "js": ["bridge.js"],
-      "run_at": "document_idle"
+      "run_at": "document_start"
     },
     {
       "matches": ["http://*/*", "https://*/*"],
       "exclude_matches": ["http://localhost:5173/*", "http://127.0.0.1:5173/*"],
       "js": ["filler.js"],
-      "run_at": "document_idle"
+      "run_at": "document_idle",
+      "all_frames": true
     }
   ]
 }

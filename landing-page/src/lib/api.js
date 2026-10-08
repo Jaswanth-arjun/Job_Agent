@@ -87,6 +87,11 @@ export const api = {
   deleteEmployee: (id) => apiFetch('', `/api/employees/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   getSentEmails: () => apiFetch('', '/api/sent-emails'),
   tailorExternalJob: (payload) => apiFetch('', '/api/external-job/tailor', { method: 'POST', body: JSON.stringify(payload) }),
+
+  // Auto-Apply (Puppeteer engine)
+  autoApply: (payload) => apiFetch('', '/api/auto-apply', { method: 'POST', body: JSON.stringify(payload) }),
+  autoApplyClose: () => apiFetch('', '/api/auto-apply/close', { method: 'POST' }),
+  provideAutoApplyInput: (payload) => apiFetch('', '/api/auto-apply/provide-input', { method: 'POST', body: JSON.stringify(payload) }),
 };
 
 const EMPLOYEE_CACHE_KEY = 'hamzo_employees';
@@ -156,9 +161,11 @@ export const resumeStore = {
   },
   add(resume) {
     const all = this.getAll();
-    all.push({ ...resume, id: Date.now().toString(), uploadedAt: new Date().toISOString(), isActive: all.length === 0 });
-    localStorage.setItem('wayin_resumes', JSON.stringify(all));
-    return all;
+    const makeActive = Boolean(resume.isActive || resume.makeActive) || all.length === 0;
+    const next = makeActive ? all.map((r) => ({ ...r, isActive: false })) : all;
+    next.push({ ...resume, id: Date.now().toString(), uploadedAt: new Date().toISOString(), isActive: makeActive });
+    localStorage.setItem('wayin_resumes', JSON.stringify(next));
+    return next;
   },
   setActive(id) {
     const all = this.getAll().map(r => ({ ...r, isActive: r.id === id }));

@@ -4,12 +4,13 @@ import {
   ArrowLeft, ArrowRight, Mail, FileText, Sparkles, ExternalLink, 
   Copy, Check, Send, UserPlus, Download, CheckCircle2, 
   MapPin, Clock, Building, Bookmark, AlertCircle, RefreshCw,
-  Upload, Eye, ChevronRight, UserCheck, ShieldCheck
+  Upload, Eye, ChevronRight, UserCheck, ShieldCheck, Target, X, Plus, Play, Square, Loader, Zap, Monitor
 } from 'lucide-react';
 import { DEMO_JOBS } from '../lib/mockData';
 import { adminJobStore } from '../lib/adminJobStore';
 import { profileStore, applicationStore, resumeStore, api, employeeStore } from '../lib/api';
 import { calculateMatchScore } from '../lib/matchScore';
+import { useAuth } from '../lib/auth';
 
 const Linkedin = ({ size = 16, style = {} }) => (
   <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={style}>
@@ -31,6 +32,20 @@ export default function Apply() {
   const profile = profileStore.get() || {};
   const resumes = resumeStore.getAll();
   const activeResume = resumes.find(r => r.isActive) || resumes[0];
+  // Prefer the resume tailored for THIS job (saved with jobUrl/jobId/company),
+  // not the stale global active resume from an older job.
+  const normKey = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  const jobLinks = [job?.applyLink, job?.url, jobId].filter(Boolean).map(String);
+  const jobResumes = (resumes || []).filter((r) => {
+    if (r.jobId && jobId && r.jobId === jobId) return true;
+    if (r.jobUrl && jobLinks.some((l) => r.jobUrl === l || String(r.jobUrl).includes(String(jobId)) || l.includes(String(r.jobUrl)))) return true;
+    return false;
+  });
+  const companySlug = normKey(job?.company);
+  const companyResume = companySlug.length >= 4
+    ? (resumes || []).find((r) => r.name && normKey(r.name).includes(companySlug.slice(0, Math.min(10, companySlug.length))))
+    : null;
+  const jobResume = jobResumes.length ? jobResumes[jobResumes.length - 1] : (companyResume || null);
 
   const matchResult = useMemo(() => calculateMatchScore(profile, job || {}), [profile, job]);
 
@@ -43,6 +58,16 @@ export default function Apply() {
   const [sendingAll, setSendingAll] = useState(false);
   const [sendSuccess, setSendSuccess] = useState(false);
 
+  // Auto-Apply state
+  const [autoApplying, setAutoApplying] = useState(false);
+  const [autoApplyProgress, setAutoApplyProgress] = useState([]);
+  const [autoApplyResult, setAutoApplyResult] = useState(null);
+  const [showAutoApplyModal, setShowAutoApplyModal] = useState(false);
+  const [autoSubmitEnabled, setAutoSubmitEnabled] = useState(false);
+  const [extensionReady, setExtensionReady] = useState(false);
+  const [tailoredPdfBase64, setTailoredPdfBase64] = useState(null);
+  const [tailoredFileName, setTailoredFileName] = useState('');
+
   // Gmail App Password Configuration Modal
   const [showGmailModal, setShowGmailModal] = useState(false);
   const [gmailAppPassInput, setGmailAppPassInput] = useState('');
@@ -50,6 +75,152 @@ export default function Apply() {
 
   // Auto-reply checkbox state
   const [autoReplyEnabled, setAutoReplyEnabled] = useState(true);
+
+  // LinkedIn connection status for Tab 2
+  const { user } = useAuth();
+  const liUserId = user?.id || 'demo-user-1';
+  const [liConnected, setLiConnected] = useState(false);
+  const [liAccount, setLiAccount] = useState(null);
+  const [liServerOnline, setLiServerOnline] = useState(false);
+  const [liChecking, setLiChecking] = useState(true);
+  const [liConnecting, setLiConnecting] = useState(false);
+  const [liConnectError, setLiConnectError] = useState('');
+
+  // Campaign Launcher state (embedded in Tab 2 when connected)
+  const DEFAULT_ROLES = ['Recruiter', 'Talent Acquisition', 'HR', 'Hiring Manager', 'Engineering Manager'];
+  const [liCompany, setLiCompany] = useState(job?.company || '');
+  const [liRoles, setLiRoles] = useState(DEFAULT_ROLES);
+  const [liNewRole, setLiNewRole] = useState('');
+  const [liPerRole, setLiPerRole] = useState(10);
+  const [liUseAI, setLiUseAI] = useState(true);
+  const [liNote, setLiNote] = useState('');
+  const [liStarting, setLiStarting] = useState(false);
+  const [liCampaignMsg, setLiCampaignMsg] = useState(null);
+  const [liIsRunning, setLiIsRunning] = useState(false);
+
+  // Check LinkedIn connection on mount
+  useEffect(() => {
+    let alive = true;
+    setLiChecking(true);
+    api.getLinkedInStatus()
+      .then(() => {
+        if (!alive) return;
+        setLiServerOnline(true);
+        return api.getLinkedInAccount(liUserId);
+      })
+      .then((acc) => {
+        if (!alive) return;
+        if (acc && acc.connected) {
+          setLiConnected(true);
+          setLiAccount(acc);
+        }
+      })
+      .catch(() => {
+        if (!alive) return;
+        setLiServerOnline(false);
+      })
+      .finally(() => {
+        if (alive) setLiChecking(false);
+      });
+    return () => { alive = false; };
+  }, [liUserId]);
+
+  // Poll for LinkedIn connection while connecting (login window open)
+  useEffect(() => {
+    if (!liConnecting) return;
+    const interval = setInterval(async () => {
+      try {
+        const acc = await api.getLinkedInAccount(liUserId);
+        if (acc && acc.connected) {
+          setLiConnected(true);
+          setLiAccount(acc);
+          setLiConnecting(false);
+          setLiConnectError('');
+        } else if (acc && acc.status === 'cancelled') {
+          setLiConnecting(false);
+        } else if (acc && acc.status === 'timeout') {
+          setLiConnecting(false);
+          setLiConnectError('Login timed out. Please try again.');
+        } else if (acc && acc.status === 'failed') {
+          setLiConnecting(false);
+          setLiConnectError(acc.error || 'Login failed. Please try again.');
+        }
+      } catch {}
+    }, 3000);
+    return () => clearInterval(interval);
+  }, [liConnecting, liUserId]);
+
+  // Handle connect LinkedIn directly from Apply page (opens Chrome login window)
+  const handleLiConnect = async () => {
+    setLiConnectError('');
+    setLiConnecting(true);
+    try {
+      const res = await api.connectLinkedIn(liUserId);
+      if (res.status === 'connected') {
+        setLiConnected(true);
+        setLiAccount(res.account);
+        setLiConnecting(false);
+      }
+      // if status === 'pending', polling will detect when login completes
+    } catch (err) {
+      setLiConnecting(false);
+      setLiConnectError(err.message || 'Failed to open LinkedIn login window. Make sure the backend server is running.');
+    }
+  };
+
+  const handleLiCancelConnect = async () => {
+    try { await api.disconnectLinkedIn(liUserId); } catch {}
+    setLiConnecting(false);
+    setLiConnectError('');
+  };
+
+  // Auto-set company when job changes
+  useEffect(() => {
+    if (job?.company) setLiCompany(job.company);
+  }, [job?.company]);
+
+  const liAddRole = () => {
+    const r = liNewRole.trim();
+    if (r && !liRoles.includes(r)) setLiRoles([...liRoles, r]);
+    setLiNewRole('');
+  };
+
+  const liFlash = (msg, type = 'ok') => {
+    setLiCampaignMsg({ msg, type });
+    setTimeout(() => setLiCampaignMsg(null), 4000);
+  };
+
+  const handleLiStartCampaign = async () => {
+    if (!liRoles.length) { liFlash('Add at least one role filter', 'err'); return; }
+    if (!liConnected) { liFlash('Connect your LinkedIn account first', 'err'); return; }
+    setLiStarting(true);
+    try {
+      await api.startLinkedIn({
+        userId: liUserId,
+        company: liCompany,
+        roles: liRoles,
+        connectionsPerFilter: liPerRole,
+        connectionNote: liNote || undefined,
+        useAINotes: liUseAI,
+        userProfile: profileStore.get() || {},
+      });
+      liFlash('🚀 Campaign started! Chrome window will open.', 'ok');
+      setLiIsRunning(true);
+    } catch (err) {
+      liFlash(err.message || 'Failed to start campaign', 'err');
+    }
+    setLiStarting(false);
+  };
+
+  const handleLiStopCampaign = async () => {
+    try {
+      await api.stopLinkedIn();
+      liFlash('Stop signal sent', 'ok');
+      setLiIsRunning(false);
+    } catch (err) {
+      liFlash(err.message || 'Failed to stop', 'err');
+    }
+  };
 
   const [employeeList, setEmployeeList] = useState([]);
   const [employeesLoading, setEmployeesLoading] = useState(false);
@@ -200,7 +371,7 @@ ${firstName}`;
         companyMark: job?.companyMark,
         jobId: job?.id,
         matchScore: matchResult.score,
-        resumeUsed: activeResume?.name || `${(profile.fullName || 'User').split(' ')[0]}-resume.pdf`,
+        resumeUsed: tailoredFileName || jobResume?.name || activeResume?.name || `${(profile.fullName || 'User').split(' ')[0]}-resume.pdf`,
         referralSentTo: selectedEmployees.map(e => e.name).join(', ')
       });
 
@@ -234,32 +405,272 @@ ${firstName}`;
     setTimeout(() => setCopiedNoteIndex(null), 2500);
   };
 
-  // Handle Tailor Resume
-  const handleTailorResume = () => {
+  // Handle Tailor Resume — generate a real tailored PDF for this job
+  const handleTailorResume = async () => {
     setIsTailoring(true);
-    setTimeout(() => {
+    setTailoredDone(false);
+    try {
+      const link = job?.applyLink || job?.url || window.location.href;
+      const active = activeResume || resumes[0];
+      const result = await api.tailorExternalJob({
+        url: link,
+        profile: profile || {},
+        resumeText: active?.text || [
+          profile.skills?.length ? `Skills: ${profile.skills.join(', ')}` : '',
+          ...(profile.experience || []).map(e => `${e.title} at ${e.company}`),
+          ...(profile.education || []).map(ed => `${ed.degree} at ${ed.school}`),
+        ].join('\n'),
+      });
+
+      const chosen = result.formats?.[0] || result.formats?.find(f => f.id === result.recommendedId);
+      if (chosen?.pdfBase64) {
+        const name = `${(profile?.fullName || 'Candidate').split(' ')[0]}-${(job?.company || 'job').replace(/\s+/g, '-')}-tailored-resume.pdf`;
+        setTailoredPdfBase64(chosen.pdfBase64);
+        setTailoredFileName(name);
+        resumeStore.add({
+          name,
+          size: '1 page PDF',
+          type: 'application/pdf',
+          pdfBase64: chosen.pdfBase64,
+          jobUrl: link,
+          jobId,
+          company: job?.company || '',
+          title: job?.title || '',
+          isActive: true,
+        });
+        setTailoredDone(true);
+      } else {
+        throw new Error('No PDF format returned from tailoring engine.');
+      }
+    } catch (err) {
+      console.warn('Tailor resume notice:', err.message);
+      const active = activeResume || resumes[0];
+      if (active?.pdfBase64 || active?.base64) {
+        setTailoredPdfBase64(active.pdfBase64 || active.base64);
+        setTailoredFileName(active.name || `${(job?.company || 'job')}-resume.pdf`);
+        setTailoredDone(true);
+      } else {
+        alert('Could not generate tailored PDF resume. Make sure the server is running (npm start).');
+      }
+    } finally {
       setIsTailoring(false);
-      setTailoredDone(true);
-    }, 1200);
+    }
   };
 
-  // Handle Direct Apply
-  const handleProceedDirectApply = () => {
-    applicationStore.add({
-      title: job?.title,
-      company: job?.company,
-      companyMark: job?.companyMark,
-      jobId: job?.id,
-      matchScore: matchResult.score,
-      resumeUsed: 'Tailored Resume (AI Customized)',
-    });
+  // Check extension availability and sync answers on mount
+  useEffect(() => {
+    let alive = true;
 
+    const markReady = () => {
+      if (!alive) return;
+      setExtensionReady(true);
+      fetch('/api/vault/answers').then(r => r.json()).then(data => {
+        if (data.answers) {
+          window.postMessage({ source: 'hamzo-app', type: 'HAMZO_SYNC_ANSWERS', answers: data.answers }, '*');
+        }
+      }).catch(() => {});
+    };
+
+    // Check DOM attribute set by bridge.js
+    if (document.documentElement?.dataset?.hamzoExtension === '1' || window.__HAMZO_EXTENSION__) {
+      markReady();
+    }
+
+    const onMsg = (event) => {
+      if (!alive) return;
+      if (event.data?.source === 'hamzo-extension' && (event.data.type === 'HAMZO_PONG' || event.data.type === 'HAMZO_ANSWERS_SYNCED')) {
+        markReady();
+      }
+    };
+    window.addEventListener('message', onMsg);
+
+    // Send PING immediately and retry every 400ms for 5 seconds
+    window.postMessage({ source: 'hamzo-app', type: 'HAMZO_PING' }, '*');
+    const interval = setInterval(() => {
+      if (!alive) return;
+      if (document.documentElement?.dataset?.hamzoExtension === '1') {
+        markReady();
+        clearInterval(interval);
+      } else {
+        window.postMessage({ source: 'hamzo-app', type: 'HAMZO_PING' }, '*');
+      }
+    }, 400);
+
+    const stopTimer = setTimeout(() => clearInterval(interval), 5000);
+
+    return () => {
+      alive = false;
+      window.removeEventListener('message', onMsg);
+      clearInterval(interval);
+      clearTimeout(stopTimer);
+    };
+  }, []);
+
+  // Listen for extension progress/completion messages
+  useEffect(() => {
+    const onExtensionMessage = (event) => {
+      if (event.data?.source !== 'hamzo-extension') return;
+
+      if (event.data.type === 'HAMZO_APPLY_PROGRESS') {
+        setAutoApplyProgress(prev => [...prev, {
+          step: event.data.step,
+          message: event.data.message,
+          timestamp: event.data.timestamp || Date.now(),
+        }]);
+      }
+
+      if (event.data.type === 'HAMZO_APPLY_COMPLETE') {
+        setAutoApplyResult({
+          status: event.data.status || 'needs_attention',
+          message: event.data.message || 'Application process completed.',
+          filledFields: [],
+          filledCount: event.data.filledCount || 0,
+          emptyCount: event.data.emptyCount || 0,
+        });
+        setAutoApplying(false);
+        if (event.data.status === 'submitted') {
+          applicationStore.add({
+            title: job?.title,
+            company: job?.company,
+            companyMark: job?.companyMark,
+            jobId: job?.id,
+            matchScore: matchResult.score,
+            resumeUsed: 'Tailored Resume (Extension Auto-Applied)',
+          });
+          setSubmitted(true);
+        }
+      }
+    };
+    window.addEventListener('message', onExtensionMessage);
+    return () => window.removeEventListener('message', onExtensionMessage);
+  }, [job, matchResult]);
+
+  // Handle Direct Apply — Extension-based auto-apply (opens new tab in same browser)
+  const handleProceedDirectApply = async () => {
     const link = job?.applyLink && job.applyLink.trim() !== '' 
       ? job.applyLink 
       : `https://www.google.com/search?q=${encodeURIComponent(job?.company + ' ' + job?.title + ' apply careers')}`;
-    
-    window.open(link, '_blank', 'noopener,noreferrer');
-    setSubmitted(true);
+
+    if (!extensionReady) {
+      alert('Hamzo Apply extension is not detected. Please load the extension in chrome://extensions (Load unpacked → select the extension folder), then reload this page.');
+      return;
+    }
+
+    setAutoApplying(true);
+    setAutoApplyProgress([]);
+    setAutoApplyResult(null);
+    setShowAutoApplyModal(true);
+
+    // Push profile to extension and trigger job open in new tab
+    const ANSWERS_KEY = 'hamzo_apply_answers';
+    let savedAnswers = {};
+    try { savedAnswers = JSON.parse(localStorage.getItem(ANSWERS_KEY) || '{}'); } catch {}
+
+    // Listen for the ready response
+    const readyPromise = new Promise((resolve) => {
+      const onMsg = (event) => {
+        if (event.data?.source === 'hamzo-extension' && event.data.type === 'HAMZO_APPLY_READY') {
+          window.removeEventListener('message', onMsg);
+          resolve(event.data);
+        }
+      };
+      window.addEventListener('message', onMsg);
+      setTimeout(() => {
+        window.removeEventListener('message', onMsg);
+        resolve({ ok: false, error: 'Hamzo Apply did not respond. Reload the extension, then refresh this page.' });
+      }, 15000);
+    });
+
+    // Ensure we have a valid PDF base64 for resume attachment.
+    // Priority: just-tailored this session > resume saved for THIS job > global active.
+    const jobPdf = jobResume?.pdfBase64 || jobResume?.base64 || '';
+    let pdfToAttach = tailoredPdfBase64 || jobPdf || activeResume?.pdfBase64 || activeResume?.base64 || '';
+    let fileNameToAttach = tailoredFileName || jobResume?.name || activeResume?.name || `${(profile?.fullName || 'Candidate').split(' ')[0]}-${(job?.company || 'job').replace(/\s+/g, '-')}-resume.pdf`;
+
+    // If no PDF exists yet, generate one on-the-fly before starting auto-apply
+    if (!pdfToAttach) {
+      try {
+        const active = activeResume || resumes[0];
+        const result = await api.tailorExternalJob({
+          url: link,
+          profile: profile || {},
+          resumeText: active?.text || '',
+        });
+        const chosen = result.formats?.[0];
+        if (chosen?.pdfBase64) {
+          pdfToAttach = chosen.pdfBase64;
+          fileNameToAttach = `${(profile?.fullName || 'Candidate').split(' ')[0]}-${(job?.company || 'job').replace(/\s+/g, '-')}-tailored-resume.pdf`;
+          resumeStore.add({
+            name: fileNameToAttach,
+            size: '1 page PDF',
+            type: 'application/pdf',
+            pdfBase64: pdfToAttach,
+            jobUrl: link,
+            jobId,
+            company: job?.company || '',
+            title: job?.title || '',
+            isActive: true,
+          });
+          setTailoredPdfBase64(pdfToAttach);
+          setTailoredFileName(fileNameToAttach);
+        }
+      } catch (err) {
+        console.warn('On-the-fly tailoring warning:', err.message);
+      }
+    }
+
+    // Send the apply request to the extension
+    window.postMessage({
+      source: 'hamzo-app',
+      type: 'HAMZO_START_APPLY',
+      url: link,
+      profile: profile || {},
+      answers: savedAnswers,
+      resumeBase64: pdfToAttach,
+      resumeName: fileNameToAttach,
+      jobTitle: job?.title || '',
+      company: job?.company || '',
+      autoSubmit: autoSubmitEnabled,
+    }, '*');
+
+    const ready = await readyPromise;
+    if (!ready.ok) {
+      setAutoApplyResult({
+        status: 'failed',
+        message: ready.error || 'Failed to open job page. Make sure the Hamzo Apply extension is loaded.',
+        filledFields: [],
+      });
+      setAutoApplying(false);
+      return;
+    }
+
+    // Add initial progress step
+    setAutoApplyProgress([{
+      step: 'opened',
+      message: `🌐 Job page opened in a new tab. Hamzo is analyzing the form...`,
+      timestamp: Date.now(),
+    }]);
+
+    // Fallback timeout — if nothing comes back in 5 minutes
+    setTimeout(() => {
+      setAutoApplying(prev => {
+        if (prev) {
+          setAutoApplyResult(r => r || {
+            status: 'needs_attention',
+            message: 'Auto-apply is taking longer than expected. Check the job tab in your browser.',
+            filledFields: [],
+          });
+          return false;
+        }
+        return prev;
+      });
+    }, 300000);
+  };
+
+  // Close auto-apply modal and cleanup
+  const handleCloseAutoApplyModal = () => {
+    setShowAutoApplyModal(false);
+    setAutoApplyProgress([]);
   };
 
   if (!job) {
@@ -275,7 +686,9 @@ ${firstName}`;
   }
 
   const userEmail = profile.email || localStorage.getItem('mailmind_gmail_email') || 'jaswanthnelluru2004@gmail.com';
-  const resumeDisplayName = activeResume?.name || `${(profile.fullName || 'Jaswanth').split(' ')[0]}-resume.pdf`;
+  // Banner + sends: just-tailored (this session) > resume saved for this job > global active.
+  const effectiveResume = (tailoredPdfBase64 && { name: tailoredFileName, pdfBase64: tailoredPdfBase64 }) || jobResume || activeResume;
+  const resumeDisplayName = effectiveResume?.name || `${(profile.fullName || 'Jaswanth').split(' ')[0]}-resume.pdf`;
 
   return (
     <div className="page-apply" style={{ maxWidth: '1040px', margin: '0 auto', padding: '30px 20px' }}>
@@ -717,7 +1130,7 @@ ${firstName}`;
             </div>
           )}
 
-          {/* Bottom Action Bar (Back Circle + CONFIRM & SEND Pill Button) */}
+          {/* Bottom Action Bar (Back Circle + CONFIRM & SEND Pill Button + NEXT Button) */}
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: '10px', paddingTop: '16px' }}>
             <button
               onClick={() => navigate(-1)}
@@ -739,31 +1152,58 @@ ${firstName}`;
               <ArrowLeft size={18} />
             </button>
 
-            <button
-              onClick={handleConfirmAndSend}
-              disabled={sendingAll || selectedEmployees.length === 0}
-              style={{
-                background: (sendingAll || selectedEmployees.length === 0) ? '#94a3b8' : '#18181b',
-                color: '#ffffff',
-                border: 'none',
-                borderRadius: '30px',
-                padding: '14px 34px',
-                fontSize: '13px',
-                fontWeight: '900',
-                letterSpacing: '0.06em',
-                textTransform: 'uppercase',
-                display: 'flex',
-                alignItems: 'center',
-                gap: '10px',
-                cursor: (sendingAll || selectedEmployees.length === 0) ? 'not-allowed' : 'pointer',
-                opacity: (sendingAll || selectedEmployees.length === 0) ? 0.6 : 1,
-                boxShadow: (sendingAll || selectedEmployees.length === 0) ? 'none' : '0 8px 24px rgba(0,0,0,0.2)',
-                transition: 'all 0.2s'
-              }}
-            >
-              <span>{sendingAll ? 'Sending Outreach...' : 'CONFIRM & SEND'}</span>
-              <ArrowRight size={16} />
-            </button>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+              <button
+                onClick={handleConfirmAndSend}
+                disabled={sendingAll || selectedEmployees.length === 0}
+                style={{
+                  background: (sendingAll || selectedEmployees.length === 0) ? '#94a3b8' : '#18181b',
+                  color: '#ffffff',
+                  border: 'none',
+                  borderRadius: '30px',
+                  padding: '14px 34px',
+                  fontSize: '13px',
+                  fontWeight: '900',
+                  letterSpacing: '0.06em',
+                  textTransform: 'uppercase',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '10px',
+                  cursor: (sendingAll || selectedEmployees.length === 0) ? 'not-allowed' : 'pointer',
+                  opacity: (sendingAll || selectedEmployees.length === 0) ? 0.6 : 1,
+                  boxShadow: (sendingAll || selectedEmployees.length === 0) ? 'none' : '0 8px 24px rgba(0,0,0,0.2)',
+                  transition: 'all 0.2s'
+                }}
+              >
+                <span>{sendingAll ? 'Sending Outreach...' : 'CONFIRM & SEND'}</span>
+                <ArrowRight size={16} />
+              </button>
+
+              <button
+                onClick={() => setActiveTab('linkedin')}
+                style={{
+                  background: '#ffffff',
+                  color: '#445cf5',
+                  border: '2px solid #445cf5',
+                  borderRadius: '30px',
+                  padding: '14px 28px',
+                  fontSize: '13px',
+                  fontWeight: '900',
+                  letterSpacing: '0.06em',
+                  textTransform: 'uppercase',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '8px',
+                  cursor: 'pointer',
+                  boxShadow: '0 4px 14px rgba(68, 92, 245, 0.12)',
+                  transition: 'all 0.2s'
+                }}
+                title="Go to 2. Connect on LinkedIn with Note"
+              >
+                <span>NEXT</span>
+                <ChevronRight size={18} />
+              </button>
+            </div>
           </div>
 
         </div>
@@ -777,68 +1217,358 @@ ${firstName}`;
               <Linkedin style={{ color: '#0077b5' }} size={20} /> Option 2: Send Connection Request with Personal Note via LinkedIn
             </h2>
             <p style={{ fontSize: '13.5px', color: '#555852', margin: 0, lineHeight: '1.5' }}>
-              Connect directly with hiring managers & recruiters at <strong>{job.company}</strong> on LinkedIn. Copy the AI-customized 300-character invitation note below!
+              Connect directly with hiring managers & recruiters at <strong>{job.company}</strong> on LinkedIn using automated outreach campaigns.
             </p>
           </div>
 
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-            {employeeList.map((emp, i) => {
-              const noteText = `Hi ${emp.name.split(' ')[0]}, I came across the ${job?.title || 'Role'} position at ${job?.company || 'your company'}. As a ${profile.title || 'Developer'} skilled in ${(profile.skills || ['Software']).slice(0, 3).join(', ')}, I would love to connect and learn more about opportunities on your team!`;
-              return (
-                <div 
-                  key={emp.name}
-                  style={{
-                    border: '1px solid #e8e8e3',
-                    borderRadius: '14px',
-                    padding: '20px',
-                    background: '#f4f7fb',
-                    display: 'flex',
-                    flexDirection: 'column',
-                    gap: '12px'
-                  }}
-                >
-                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '12px' }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-                      <div style={{ width: '40px', height: '40px', borderRadius: '50%', background: '#0077b5', color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: '700', fontSize: '15px' }}>
-                        <Linkedin size={20} />
-                      </div>
-                      <div>
-                        <h4 style={{ fontSize: '15px', fontWeight: '800', margin: 0, color: '#171817' }}>{emp.name}</h4>
-                        <p style={{ fontSize: '12.5px', color: '#666', margin: '2px 0 0' }}>{emp.role}</p>
-                      </div>
-                    </div>
+          {/* LinkedIn Connection Status Check */}
+          {liChecking ? (
+            <div style={{ textAlign: 'center', padding: '40px 20px' }}>
+              <div style={{ width: '40px', height: '40px', border: '3px solid #e2e8f0', borderTop: '3px solid #0077b5', borderRadius: '50%', margin: '0 auto 16px', animation: 'spin 1s linear infinite' }} />
+              <p style={{ color: '#718096', fontSize: '14px', margin: 0 }}>Checking LinkedIn connection...</p>
+            </div>
+          ) : !liConnected ? (
+            /* NOT CONNECTED — Show Connect Prompt or Connecting State */
+            <div style={{
+              background: 'linear-gradient(135deg, #f0f7ff 0%, #e8f4fd 100%)',
+              border: `2px dashed ${liConnecting ? '#f59e0b' : '#0077b5'}`,
+              borderRadius: '16px',
+              padding: '40px 32px',
+              textAlign: 'center'
+            }}>
+              <div style={{
+                width: '72px', height: '72px', borderRadius: '50%',
+                background: liConnecting ? 'linear-gradient(135deg, #f59e0b, #d97706)' : 'linear-gradient(135deg, #0077b5, #005885)',
+                color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center',
+                margin: '0 auto 20px', boxShadow: liConnecting ? '0 8px 24px rgba(245, 158, 11, 0.3)' : '0 8px 24px rgba(0, 119, 181, 0.25)'
+              }}>
+                {liConnecting ? (
+                  <div style={{ width: '36px', height: '36px', border: '3px solid rgba(255,255,255,0.3)', borderTop: '3px solid #fff', borderRadius: '50%', animation: 'spin 1s linear infinite' }} />
+                ) : (
+                  <Linkedin size={36} />
+                )}
+              </div>
+
+              {liConnecting ? (
+                /* CONNECTING STATE — Chrome login window is open */
+                <>
+                  <h3 style={{ fontSize: '20px', fontWeight: '800', color: '#1a202c', margin: '0 0 8px' }}>
+                    🌐 LinkedIn Login Window Opened
+                  </h3>
+                  <p style={{ fontSize: '14px', color: '#64748b', margin: '0 0 8px', maxWidth: '460px', marginLeft: 'auto', marginRight: 'auto', lineHeight: '1.6' }}>
+                    A Chrome browser window has opened for LinkedIn login. Please log in with your LinkedIn credentials <strong>(2FA supported)</strong>.
+                  </p>
+                  <p style={{ fontSize: '13px', color: '#0077b5', fontWeight: '700', margin: '0 0 20px' }}>
+                    ⏳ Waiting for login completion... this page will auto-update once connected.
+                  </p>
+                  <button
+                    onClick={handleLiCancelConnect}
+                    style={{
+                      background: '#ffffff',
+                      color: '#dc2626',
+                      border: '2px solid #fecaca',
+                      borderRadius: '30px',
+                      padding: '12px 28px',
+                      fontSize: '14px',
+                      fontWeight: '700',
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: '8px',
+                      cursor: 'pointer',
+                      transition: 'all 0.2s'
+                    }}
+                  >
+                    <X size={16} /> Cancel
+                  </button>
+                </>
+              ) : (
+                /* NOT CONNECTING — Show Connect Button */
+                <>
+                  <h3 style={{ fontSize: '20px', fontWeight: '800', color: '#1a202c', margin: '0 0 8px' }}>
+                    Please connect your LinkedIn
+                  </h3>
+                  <p style={{ fontSize: '14px', color: '#64748b', margin: '0 0 24px', maxWidth: '460px', marginLeft: 'auto', marginRight: 'auto', lineHeight: '1.6' }}>
+                    To launch automated LinkedIn outreach campaigns for <strong>{job.company}</strong>, you need to connect your LinkedIn account first. This allows HAMZO to send personalized connection requests to recruiters and hiring managers on your behalf.
+                  </p>
+                  <button
+                    onClick={handleLiConnect}
+                    disabled={!liServerOnline}
+                    style={{
+                      background: liServerOnline ? 'linear-gradient(135deg, #0077b5, #005885)' : '#94a3b8',
+                      color: '#ffffff',
+                      border: 'none',
+                      borderRadius: '30px',
+                      padding: '16px 36px',
+                      fontSize: '15px',
+                      fontWeight: '800',
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: '10px',
+                      cursor: liServerOnline ? 'pointer' : 'not-allowed',
+                      boxShadow: liServerOnline ? '0 8px 28px rgba(0, 119, 181, 0.3)' : 'none',
+                      transition: 'all 0.2s',
+                      letterSpacing: '0.02em',
+                      opacity: liServerOnline ? 1 : 0.6
+                    }}
+                  >
+                    <Linkedin size={18} /> Click here to connect your LinkedIn
+                  </button>
+                  {!liServerOnline && (
+                    <p style={{ fontSize: '12px', color: '#dc2626', marginTop: '16px', fontWeight: '600' }}>
+                      ⚠️ LinkedIn automation server is offline. Please start the backend first.
+                    </p>
+                  )}
+                  {liConnectError && (
+                    <p style={{ fontSize: '13px', color: '#dc2626', marginTop: '16px', fontWeight: '600', maxWidth: '460px', marginLeft: 'auto', marginRight: 'auto' }}>
+                      ⚠️ {liConnectError}
+                    </p>
+                  )}
+                </>
+              )}
+            </div>
+          ) : (
+            /* CONNECTED — Show Campaign Launcher */
+            <div>
+              {/* Connected Badge */}
+              <div style={{
+                background: '#ecfdf5', border: '1px solid #a7f3d0', borderRadius: '12px',
+                padding: '14px 20px', marginBottom: '20px',
+                display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '10px'
+              }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                  <CheckCircle2 size={20} style={{ color: '#059669' }} />
+                  <span style={{ fontSize: '14px', fontWeight: '700', color: '#064e3b' }}>
+                    LinkedIn connected as <strong>{liAccount?.memberName || 'LinkedIn Member'}</strong>
+                  </span>
+                </div>
+                <span style={{ fontSize: '11px', fontWeight: '700', color: '#059669', background: '#d1fae5', padding: '4px 12px', borderRadius: '20px' }}>
+                  ✓ Connected
+                </span>
+              </div>
+
+              {/* Campaign Launcher Card */}
+              <div style={{ border: '1px solid #e2e8f0', borderRadius: '16px', padding: '24px', background: '#fafafa' }}>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '20px' }}>
+                  <h3 style={{ fontSize: '16px', fontWeight: '800', color: '#1a202c', margin: 0, display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <Target size={18} /> Campaign Launcher
+                  </h3>
+                  <span style={{
+                    fontSize: '11px', fontWeight: '700',
+                    color: liIsRunning ? '#059669' : '#64748b',
+                    background: liIsRunning ? '#d1fae5' : '#f1f5f9',
+                    padding: '4px 12px', borderRadius: '20px'
+                  }}>
+                    {liIsRunning ? 'Running' : 'Idle'}
+                  </span>
+                </div>
+
+                {/* Target Company */}
+                <div style={{ marginBottom: '16px' }}>
+                  <label style={{ fontSize: '11px', fontWeight: '800', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.06em', display: 'block', marginBottom: '6px' }}>
+                    Target Company
+                  </label>
+                  <input
+                    value={liCompany}
+                    onChange={(e) => setLiCompany(e.target.value)}
+                    placeholder="e.g. Google, Microsoft, Meta or LinkedIn URL"
+                    disabled={liIsRunning}
+                    style={{
+                      width: '100%', padding: '12px 16px', border: '1px solid #e2e8f0',
+                      borderRadius: '10px', fontSize: '14px', color: '#1a202c',
+                      background: '#ffffff', outline: 'none', fontFamily: 'inherit'
+                    }}
+                  />
+                </div>
+
+                {/* Role Filters */}
+                <div style={{ marginBottom: '16px' }}>
+                  <label style={{ fontSize: '11px', fontWeight: '800', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.06em', display: 'block', marginBottom: '6px' }}>
+                    Role Filters
+                  </label>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px', marginBottom: '10px' }}>
+                    {liRoles.map((r) => (
+                      <span key={r} style={{
+                        background: '#ecfdf5', color: '#047857', border: '1px solid #a7f3d0',
+                        borderRadius: '20px', padding: '6px 14px', fontSize: '13px', fontWeight: '700',
+                        display: 'inline-flex', alignItems: 'center', gap: '6px'
+                      }}>
+                        {r}
+                        {!liIsRunning && (
+                          <button onClick={() => setLiRoles(liRoles.filter((x) => x !== r))} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 0, color: '#059669', display: 'flex' }}>
+                            <X size={12} />
+                          </button>
+                        )}
+                      </span>
+                    ))}
                   </div>
-
-                  {/* LinkedIn Note Text Area */}
-                  <div style={{ background: '#ffffff', border: '1px solid #cce0ff', borderRadius: '10px', padding: '14px', fontSize: '13px', color: '#333', lineHeight: '1.5', position: 'relative' }}>
-                    <div style={{ fontSize: '10px', fontWeight: '800', color: '#0077b5', textTransform: 'uppercase', marginBottom: '6px' }}>
-                      AI Custom LinkedIn Note ({noteText.length} / 300 chars)
+                  {!liIsRunning && (
+                    <div style={{ display: 'flex', gap: '8px' }}>
+                      <input
+                        value={liNewRole}
+                        onChange={(e) => setLiNewRole(e.target.value)}
+                        onKeyDown={(e) => e.key === 'Enter' && liAddRole()}
+                        placeholder="Add role (e.g. Engineering Manager)"
+                        style={{
+                          flex: 1, padding: '10px 14px', border: '1px solid #e2e8f0',
+                          borderRadius: '10px', fontSize: '13px', outline: 'none', fontFamily: 'inherit'
+                        }}
+                      />
+                      <button onClick={liAddRole} style={{
+                        background: '#ffffff', border: '1px solid #e2e8f0', borderRadius: '10px',
+                        padding: '10px 16px', fontSize: '13px', fontWeight: '700', cursor: 'pointer',
+                        display: 'flex', alignItems: 'center', gap: '4px', color: '#1a202c'
+                      }}>
+                        <Plus size={14} /> Add
+                      </button>
                     </div>
-                    {noteText}
+                  )}
+                </div>
+
+                {/* Connections / Role + AI Notes */}
+                <div style={{ display: 'flex', gap: '16px', marginBottom: '16px', flexWrap: 'wrap' }}>
+                  <div style={{ flex: 1, minWidth: '160px' }}>
+                    <label style={{ fontSize: '11px', fontWeight: '800', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.06em', display: 'block', marginBottom: '6px' }}>
+                      Connections / Role
+                    </label>
+                    <input
+                      type="number" min="1" max="40" value={liPerRole}
+                      onChange={(e) => setLiPerRole(Number(e.target.value) || 10)}
+                      disabled={liIsRunning}
+                      style={{
+                        width: '100%', padding: '12px 16px', border: '1px solid #e2e8f0',
+                        borderRadius: '10px', fontSize: '14px', outline: 'none', fontFamily: 'inherit'
+                      }}
+                    />
                   </div>
-
-                  {/* Action Buttons */}
-                  <div style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end' }}>
+                  <div style={{ flex: 1, minWidth: '160px' }}>
+                    <label style={{ fontSize: '11px', fontWeight: '800', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.06em', display: 'block', marginBottom: '6px' }}>
+                      AI Personalized Notes
+                    </label>
                     <button
-                      className="btn-ghost"
-                      onClick={() => handleCopyNote(noteText, `li-${i}`)}
-                      style={{ fontSize: '12.5px', padding: '8px 14px' }}
+                      onClick={() => setLiUseAI(!liUseAI)}
+                      disabled={liIsRunning}
+                      style={{
+                        width: '100%', padding: '12px 16px',
+                        border: liUseAI ? '1.5px solid #a78bfa' : '1px solid #e2e8f0',
+                        borderRadius: '10px', fontSize: '13px', fontWeight: '700',
+                        background: liUseAI ? '#f5f3ff' : '#ffffff',
+                        color: liUseAI ? '#6d28d9' : '#64748b',
+                        cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px'
+                      }}
                     >
-                      {copiedNoteIndex === `li-${i}` ? <Check size={14} style={{ color: '#22a65b' }} /> : <Copy size={14} />}
-                      {copiedNoteIndex === `li-${i}` ? 'Note Copied!' : 'Copy Note'}
-                    </button>
-
-                    <button
-                      className="btn-accent"
-                      onClick={() => window.open(emp.linkedin, '_blank', 'noopener,noreferrer')}
-                      style={{ fontSize: '12.5px', padding: '8px 16px', background: '#0077b5', borderColor: '#0077b5', gap: '6px' }}
-                    >
-                      <UserPlus size={14} /> Connect on LinkedIn <ExternalLink size={12} />
+                      <Sparkles size={14} /> {liUseAI ? 'Gemini AI On' : 'Template Notes'}
                     </button>
                   </div>
                 </div>
-              );
-            })}
+
+                {/* Custom Note Template */}
+                <div style={{ marginBottom: '20px' }}>
+                  <label style={{ fontSize: '11px', fontWeight: '800', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.06em', display: 'block', marginBottom: '6px' }}>
+                    Custom Note Template <em style={{ fontWeight: '400', textTransform: 'none' }}>({liUseAI ? 'optional — used as fallback' : 'used for everyone'})</em>
+                  </label>
+                  <textarea
+                    rows={3}
+                    value={liNote}
+                    onChange={(e) => setLiNote(e.target.value)}
+                    placeholder={`Hi {name}, I'd love to connect and learn more about opportunities at your company!`}
+                    disabled={liIsRunning}
+                    style={{
+                      width: '100%', padding: '12px 16px', border: '1px solid #e2e8f0',
+                      borderRadius: '10px', fontSize: '13px', lineHeight: '1.6',
+                      outline: 'none', fontFamily: 'inherit', resize: 'vertical'
+                    }}
+                  />
+                </div>
+
+                {/* Campaign Message */}
+                {liCampaignMsg && (
+                  <div style={{
+                    padding: '12px 16px', borderRadius: '10px', marginBottom: '16px',
+                    background: liCampaignMsg.type === 'err' ? '#fef2f2' : '#ecfdf5',
+                    color: liCampaignMsg.type === 'err' ? '#991b1b' : '#064e3b',
+                    border: `1px solid ${liCampaignMsg.type === 'err' ? '#fecaca' : '#a7f3d0'}`,
+                    fontSize: '13px', fontWeight: '700'
+                  }}>
+                    {liCampaignMsg.msg}
+                  </div>
+                )}
+
+                {/* Start / Stop Button */}
+                <div>
+                  {liIsRunning ? (
+                    <button
+                      onClick={handleLiStopCampaign}
+                      style={{
+                        width: '100%', padding: '16px', background: '#dc2626', color: '#fff',
+                        border: 'none', borderRadius: '12px', fontSize: '15px', fontWeight: '800',
+                        cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px'
+                      }}
+                    >
+                      <Square size={16} /> Stop Campaign
+                    </button>
+                  ) : (
+                    <button
+                      onClick={handleLiStartCampaign}
+                      disabled={liStarting}
+                      style={{
+                        width: '100%', padding: '16px',
+                        background: '#18181b', color: '#fff',
+                        border: 'none', borderRadius: '12px', fontSize: '15px', fontWeight: '800',
+                        cursor: liStarting ? 'wait' : 'pointer',
+                        display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px',
+                        boxShadow: '0 4px 16px rgba(0,0,0,0.15)'
+                      }}
+                    >
+                      <Play size={16} /> {liStarting ? 'Starting...' : `Start Campaign (${liRoles.length * liPerRole} requests)`}
+                    </button>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Bottom Action Bar for LinkedIn Tab */}
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: '24px', paddingTop: '16px', borderTop: '1px solid #e8e8e3' }}>
+            <button
+              onClick={() => setActiveTab('referral')}
+              style={{
+                background: '#ffffff',
+                color: '#64748b',
+                border: '1px solid #cbd5e0',
+                borderRadius: '30px',
+                padding: '12px 24px',
+                fontSize: '13px',
+                fontWeight: '700',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '8px',
+                cursor: 'pointer'
+              }}
+            >
+              <ArrowLeft size={16} /> Back to Referral Email
+            </button>
+
+            <button
+              onClick={() => setActiveTab('tailor')}
+              style={{
+                background: '#445cf5',
+                color: '#ffffff',
+                border: 'none',
+                borderRadius: '30px',
+                padding: '12px 28px',
+                fontSize: '13px',
+                fontWeight: '800',
+                letterSpacing: '0.04em',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '8px',
+                cursor: 'pointer',
+                boxShadow: '0 4px 14px rgba(68, 92, 245, 0.2)'
+              }}
+            >
+              <span>Next: Direct Apply / Tailor Resume</span>
+              <ChevronRight size={18} />
+            </button>
           </div>
         </div>
       )}
@@ -912,7 +1642,17 @@ ${firstName}`;
               {tailoredDone && (
                 <button
                   className="btn-ghost"
-                  onClick={() => alert('Tailored Resume downloaded! Attach it during your direct application.')}
+                  onClick={() => {
+                    if (!tailoredPdfBase64) return alert('No PDF available to download');
+                    const binary = atob(tailoredPdfBase64.includes(',') ? tailoredPdfBase64.split(',')[1] : tailoredPdfBase64);
+                    const bytes = new Uint8Array(binary.length);
+                    for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+                    const blobUrl = URL.createObjectURL(new Blob([bytes], { type: 'application/pdf' }));
+                    const a = document.createElement('a');
+                    a.href = blobUrl;
+                    a.download = tailoredFileName || 'tailored-resume.pdf';
+                    a.click();
+                  }}
                   style={{ padding: '12px 20px', fontSize: '14px', gap: '8px' }}
                 >
                   <Download size={16} /> Download Tailored Resume (PDF)
@@ -921,27 +1661,258 @@ ${firstName}`;
             </div>
           </div>
 
+          {/* Extension Status & Auto-Submit Settings */}
+          <div style={{ background: extensionReady ? '#ecfdf5' : '#fef2f2', border: `1px solid ${extensionReady ? '#a7f3d0' : '#fecaca'}`, borderRadius: '12px', padding: '14px 20px', marginBottom: '16px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '10px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+              <div style={{ width: '10px', height: '10px', borderRadius: '50%', background: extensionReady ? '#059669' : '#dc2626', flexShrink: 0 }} />
+              <span style={{ fontSize: '13px', fontWeight: '700', color: extensionReady ? '#064e3b' : '#991b1b' }}>
+                {extensionReady ? 'Hamzo Apply extension connected' : 'Extension not detected — load it in chrome://extensions'}
+              </span>
+            </div>
+            <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '12.5px', color: '#064e3b', fontWeight: '600', cursor: 'pointer' }}>
+              <input type="checkbox" checked={autoSubmitEnabled} onChange={(e) => setAutoSubmitEnabled(e.target.checked)} style={{ width: '16px', height: '16px', accentColor: '#059669' }} />
+              <span>Auto-submit (skip confirmation)</span>
+            </label>
+          </div>
+
           {/* Final Direct Apply CTA */}
           <div style={{ background: '#171817', color: '#ffffff', borderRadius: '14px', padding: '24px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '16px' }}>
             <div>
               <h4 style={{ fontSize: '16px', fontWeight: '800', margin: '0 0 4px', color: '#fff' }}>
-                Ready to Submit Direct Application?
+                {submitted ? '✅ Application Submitted!' : 'Ready to Submit Direct Application?'}
               </h4>
               <p style={{ fontSize: '12.5px', color: '#aaa', margin: 0 }}>
-                Redirects to {job.company}'s official application portal while tracking your application state in HAMZO.
+                {submitted 
+                  ? `HAMZO auto-applied to ${job.company} successfully.`
+                  : `Opens the job in a new tab, fills the form, and asks you before submitting.`}
               </p>
             </div>
 
             <button
               className="btn-accent"
               onClick={handleProceedDirectApply}
-              style={{ background: '#22a65b', borderColor: '#22a65b', fontSize: '14px', padding: '12px 24px', gap: '8px' }}
+              disabled={autoApplying || submitted || !extensionReady}
+              style={{ 
+                background: submitted ? '#059669' : autoApplying ? '#6b7280' : !extensionReady ? '#94a3b8' : '#22a65b', 
+                borderColor: submitted ? '#059669' : autoApplying ? '#6b7280' : !extensionReady ? '#94a3b8' : '#22a65b', 
+                fontSize: '14px', padding: '12px 24px', gap: '8px',
+                opacity: (autoApplying || !extensionReady) ? 0.7 : 1,
+                cursor: (autoApplying || submitted || !extensionReady) ? 'not-allowed' : 'pointer'
+              }}
             >
-              <ExternalLink size={16} /> Direct Apply on Official Portal
+              {autoApplying ? (
+                <><Loader size={16} className="spin" /> Auto-Applying...</>
+              ) : submitted ? (
+                <><CheckCircle2 size={16} /> Applied Successfully</>
+              ) : (
+                <><Zap size={16} /> Auto Apply with AI</>
+              )}
             </button>
           </div>
         </div>
       )}
+
+      {/* ═══ AUTO-APPLY PROGRESS MODAL ═══ */}
+      {showAutoApplyModal && (
+        <div style={{
+          position: 'fixed', inset: 0, zIndex: 9999,
+          background: 'rgba(0,0,0,0.6)', backdropFilter: 'blur(6px)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          padding: '20px'
+        }}>
+          <div style={{
+            background: '#ffffff', borderRadius: '20px', width: '100%', maxWidth: '560px',
+            maxHeight: '80vh', overflow: 'hidden', boxShadow: '0 25px 60px rgba(0,0,0,0.3)',
+            display: 'flex', flexDirection: 'column'
+          }}>
+            {/* Modal Header */}
+            <div style={{
+              background: autoApplyResult?.status === 'submitted' ? 'linear-gradient(135deg, #059669, #10b981)'
+                : autoApplyResult?.status === 'failed' ? 'linear-gradient(135deg, #dc2626, #ef4444)'
+                : autoApplyResult?.status === 'needs_attention' ? 'linear-gradient(135deg, #d97706, #f59e0b)'
+                : 'linear-gradient(135deg, #171817, #2a2c2a)',
+              padding: '24px 28px', color: '#fff',
+              display: 'flex', alignItems: 'center', justifyContent: 'space-between'
+            }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                {autoApplying ? (
+                  <div style={{
+                    width: '40px', height: '40px', borderRadius: '12px',
+                    background: 'rgba(255,255,255,0.15)', display: 'flex', alignItems: 'center', justifyContent: 'center'
+                  }}>
+                    <Loader size={22} className="spin" />
+                  </div>
+                ) : autoApplyResult?.status === 'submitted' ? (
+                  <div style={{
+                    width: '40px', height: '40px', borderRadius: '12px',
+                    background: 'rgba(255,255,255,0.2)', display: 'flex', alignItems: 'center', justifyContent: 'center'
+                  }}>
+                    <CheckCircle2 size={22} />
+                  </div>
+                ) : (
+                  <div style={{
+                    width: '40px', height: '40px', borderRadius: '12px',
+                    background: 'rgba(255,255,255,0.15)', display: 'flex', alignItems: 'center', justifyContent: 'center'
+                  }}>
+                    <AlertCircle size={22} />
+                  </div>
+                )}
+                <div>
+                  <h3 style={{ margin: 0, fontSize: '17px', fontWeight: '800' }}>
+                    {autoApplying ? 'Auto-Applying...' 
+                      : autoApplyResult?.status === 'submitted' ? 'Application Submitted!' 
+                      : autoApplyResult?.status === 'needs_attention' ? 'Needs Your Attention'
+                      : 'Auto-Apply Failed'}
+                  </h3>
+                  <p style={{ margin: '2px 0 0', fontSize: '12px', opacity: 0.85 }}>
+                    {job?.title} at {job?.company}
+                  </p>
+                </div>
+              </div>
+              {!autoApplying && (
+                <button onClick={handleCloseAutoApplyModal} style={{
+                  background: 'rgba(255,255,255,0.2)', border: 'none', borderRadius: '10px',
+                  width: '32px', height: '32px', display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  cursor: 'pointer', color: '#fff'
+                }}>
+                  <X size={16} />
+                </button>
+              )}
+            </div>
+
+            {/* Progress Steps */}
+            <div style={{ padding: '20px 28px', overflowY: 'auto', flex: 1 }}>
+              {autoApplying && (
+                <div style={{
+                  width: '100%', height: '4px', background: '#e5e7eb', borderRadius: '2px',
+                  marginBottom: '20px', overflow: 'hidden'
+                }}>
+                  <div style={{
+                    height: '100%', width: '60%', borderRadius: '2px',
+                    background: 'linear-gradient(90deg, #059669, #10b981, #059669)',
+                    backgroundSize: '200% 100%',
+                    animation: 'shimmer 1.5s infinite'
+                  }} />
+                </div>
+              )}
+
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                {autoApplyProgress.map((step, i) => (
+                  <div key={i} style={{
+                    display: 'flex', alignItems: 'flex-start', gap: '10px',
+                    padding: '10px 14px', borderRadius: '10px',
+                    background: i === autoApplyProgress.length - 1 && autoApplying ? '#f0fdf4' : '#f8fafc',
+                    border: i === autoApplyProgress.length - 1 && autoApplying ? '1px solid #a7f3d0' : '1px solid #e5e7eb',
+                    transition: 'all 0.3s ease'
+                  }}>
+                    <div style={{
+                      width: '24px', height: '24px', borderRadius: '50%', flexShrink: 0,
+                      background: step.step === 'error' ? '#fee2e2' 
+                        : step.step === 'needs_attention' ? '#fef3c7'
+                        : step.step === 'submitted' ? '#d1fae5' 
+                        : '#e0f2fe',
+                      display: 'flex', alignItems: 'center', justifyContent: 'center',
+                      fontSize: '12px'
+                    }}>
+                      {step.step === 'submitted' ? '✅' 
+                        : step.step === 'error' ? '❌'
+                        : step.step === 'needs_attention' ? '⚠️'
+                        : i === autoApplyProgress.length - 1 && autoApplying ? '⏳' : '✓'}
+                    </div>
+                    <div>
+                      <p style={{ margin: 0, fontSize: '13px', fontWeight: '600', color: '#1a202c' }}>
+                        {step.message}
+                      </p>
+                      <span style={{ fontSize: '11px', color: '#94a3b8' }}>
+                        {new Date(step.timestamp).toLocaleTimeString()}
+                      </span>
+                    </div>
+                  </div>
+                ))}
+
+                {autoApplying && autoApplyProgress.length === 0 && (
+                  <div style={{ textAlign: 'center', padding: '30px', color: '#6b7280' }}>
+                    <Loader size={28} className="spin" style={{ marginBottom: '12px', color: '#059669' }} />
+                    <p style={{ margin: 0, fontWeight: '600' }}>Opening job page in a new tab...</p>
+                    <p style={{ margin: '4px 0 0', fontSize: '12px' }}>Hamzo will fill the form directly in your browser!</p>
+                  </div>
+                )}
+              </div>
+
+              {/* Extension Info Note */}
+              {autoApplying && autoApplyProgress.length > 0 && (
+                <div style={{
+                  marginTop: '12px', padding: '12px 16px', borderRadius: '10px',
+                  background: '#f0fdf4', border: '1px solid #bbf7d0',
+                  fontSize: '12px', color: '#166534', fontWeight: '600'
+                }}>
+                  💡 If Hamzo needs additional information, a pop-up will appear directly on the job page in the new tab. Switch to that tab to respond.
+                </div>
+              )}
+
+              {/* Result Message */}
+              {autoApplyResult && (
+                <div style={{
+                  marginTop: '16px', padding: '16px 20px', borderRadius: '12px',
+                  background: autoApplyResult.status === 'submitted' ? '#ecfdf5' 
+                    : autoApplyResult.status === 'needs_attention' ? '#fffbeb' 
+                    : autoApplyResult.status === 'cancelled' ? '#f3f4f6' : '#fef2f2',
+                  border: `1px solid ${autoApplyResult.status === 'submitted' ? '#a7f3d0' 
+                    : autoApplyResult.status === 'needs_attention' ? '#fde68a' 
+                    : autoApplyResult.status === 'cancelled' ? '#d1d5db' : '#fecaca'}`
+                }}>
+                  <p style={{ margin: 0, fontWeight: '700', fontSize: '14px', color: '#1a202c' }}>
+                    {autoApplyResult.message}
+                  </p>
+                  {(autoApplyResult.filledCount > 0 || autoApplyResult.emptyCount > 0) && (
+                    <p style={{ margin: '6px 0 0', fontSize: '12px', color: '#6b7280' }}>
+                      {autoApplyResult.filledCount > 0 && `${autoApplyResult.filledCount} fields filled`}
+                      {autoApplyResult.filledCount > 0 && autoApplyResult.emptyCount > 0 && ' · '}
+                      {autoApplyResult.emptyCount > 0 && `${autoApplyResult.emptyCount} need attention`}
+                    </p>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* Modal Footer */}
+            <div style={{
+              padding: '16px 28px', borderTop: '1px solid #e5e7eb',
+              display: 'flex', justifyContent: 'flex-end', gap: '10px'
+            }}>
+              {autoApplyResult?.status === 'needs_attention' && (
+                <button
+                  onClick={() => {
+                    const link = job?.applyLink || autoApplyResult?.applyUrl;
+                    if (link) window.open(link, '_blank');
+                  }}
+                  className="btn-accent"
+                  style={{ background: '#d97706', borderColor: '#d97706', fontSize: '13px', padding: '10px 18px', gap: '6px' }}
+                >
+                  <Monitor size={14} /> Complete Manually
+                </button>
+              )}
+              {!autoApplying && (
+                <button
+                  onClick={handleCloseAutoApplyModal}
+                  className="btn-ghost"
+                  style={{ fontSize: '13px', padding: '10px 18px' }}
+                >
+                  Close
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Shimmer keyframes for progress bar */}
+      <style>{`
+        @keyframes shimmer {
+          0% { background-position: -200% 0; }
+          100% { background-position: 200% 0; }
+        }
+      `}</style>
 
     </div>
   );

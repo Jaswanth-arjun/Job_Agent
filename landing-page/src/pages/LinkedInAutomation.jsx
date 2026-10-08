@@ -3,7 +3,8 @@ import {
   Users, UserCheck, Eye, MessageCircle, Clock, Play, Square, RefreshCw, Search,
   ExternalLink, Sparkles, Terminal, Plus, X, Radio, Activity, Zap, Target, KeyRound,
 } from 'lucide-react';
-import { api } from '../lib/api';
+import { useSearchParams } from 'react-router-dom';
+import { api, profileStore } from '../lib/api';
 import { useAuth } from '../lib/auth';
 import ConnectedAccount from '../components/ConnectedAccount';
 import EmptyState from '../components/EmptyState';
@@ -55,7 +56,8 @@ export default function LinkedInAutomation() {
   const [cookieBusy, setCookieBusy] = useState(false);
 
   // Campaign form
-  const [company, setCompany] = useState('');
+  const [searchParams] = useSearchParams();
+  const [company, setCompany] = useState(() => searchParams.get('company') || '');
   const [roles, setRoles] = useState(DEFAULT_ROLES);
   const [newRole, setNewRole] = useState('');
   const [perRole, setPerRole] = useState(10);
@@ -283,6 +285,7 @@ export default function LinkedInAutomation() {
         connectionsPerFilter: perRole,
         connectionNote: note || undefined,
         useAINotes: useAI,
+        userProfile: profileStore.get() || {},
       });
       flash('🚀 Campaign started! Chrome window will open.', 'ok');
       setStatusInfo((s) => ({ ...(s || {}), status: 'running' }));

@@ -1,422 +1,475 @@
-import React, { useState, useEffect } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { ArrowUpRight, ArrowRight, Check, ChevronDown, Sparkles, Send, Search, Menu, X, Mail, AtSign, FileText, Heart, ChevronLeft, ChevronRight } from 'lucide-react';
+import {
+  ArrowRight,
+  ArrowUpRight,
+  Check,
+  ChevronDown,
+  ChevronLeft,
+  ChevronRight,
+  Briefcase,
+  Mail,
+  FileText,
+  LayoutDashboard,
+  Search,
+  Send,
+  Sparkles,
+  Menu,
+  X,
+  ShieldCheck,
+  Zap,
+  Users,
+  Bell,
+  Globe,
+} from 'lucide-react';
 import { useAuth } from '../lib/auth';
 import VideoLoader from '../components/VideoLoader';
+import './Landing.css';
 
-const Button = ({ children, ghost = false, onClick }) => (
-  <button onClick={onClick} className={`button ${ghost ? 'ghost' : ''}`}>
-    {children}
-    <ArrowUpRight size={16} />
-  </button>
-);
-const Tag = ({ children }) => <span className="tag">{children}</span>;
+/* ---------- helpers ---------- */
 
-function Nav() {
+function useCountUp(target, active, duration = 1400) {
+  const [value, setValue] = useState(0);
+  useEffect(() => {
+    if (!active) return;
+    let raf = 0;
+    const start = performance.now();
+    const tick = (now) => {
+      const p = Math.min(1, (now - start) / duration);
+      const eased = 1 - Math.pow(1 - p, 3);
+      setValue(Math.round(target * eased));
+      if (p < 1) raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [active, target, duration]);
+  return value;
+}
+
+function useReveal() {
+  const ref = useRef(null);
+  const [visible, setVisible] = useState(false);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const io = new IntersectionObserver(
+      (entries) => {
+        if (entries[0].isIntersecting) {
+          setVisible(true);
+          io.disconnect();
+        }
+      },
+      { threshold: 0.2 }
+    );
+    io.observe(el);
+    return () => io.disconnect();
+  }, []);
+  return [ref, visible];
+}
+
+/* ---------- data (matches real backend routes) ---------- */
+
+const TABS = [
+  { id: 'linkedin', label: 'LinkedIn', icon: <Briefcase size={15} />, route: '/dashboard/linkedin' },
+  { id: 'mail', label: 'Email', icon: <Mail size={15} />, route: '/dashboard/mail' },
+  { id: 'resume', label: 'Resume', icon: <FileText size={15} />, route: '/dashboard/resume' },
+  { id: 'track', label: 'Tracker', icon: <LayoutDashboard size={15} />, route: '/dashboard/applications' },
+];
+
+const FEATURES = [
+  {
+    icon: <Briefcase size={20} />,
+    tint: 'blue',
+    title: 'LinkedIn connect automation',
+    desc: 'Role-based connection campaigns with personalized notes, per-account sessions and live status sync.',
+    points: ['10 invites per role filter', 'li_at cookie or login window', 'Auto accept / withdraw sync'],
+    route: '/dashboard/linkedin',
+    cta: 'Open LinkedIn',
+  },
+  {
+    icon: <Mail size={20} />,
+    tint: 'green',
+    title: 'Gmail outreach + follow-ups',
+    desc: 'Send referral requests, AI summaries, replies and polite follow-ups — all attached to the opportunity.',
+    points: ['OAuth + App-password send', 'Summarize / reply with AI', 'Sent-mail history'],
+    route: '/dashboard/mail',
+    cta: 'Open Mail',
+  },
+  {
+    icon: <FileText size={20} />,
+    tint: 'purple',
+    title: 'AI resume tailor',
+    desc: 'Paste any job link. Get a one-page tailored resume in 3 polished formats with match keywords.',
+    points: ['External job link parser', '3 PDF formats', 'Keyword gap analysis'],
+    route: '/dashboard/resume',
+    cta: 'Tailor resume',
+  },
+  {
+    icon: <Search size={20} />,
+    tint: 'orange',
+    title: 'Job board with match score',
+    desc: 'Curated roles with skill-match scoring, filters and one-click apply flow.',
+    points: ['Match % per role', 'Save + filter jobs', 'Guided apply steps'],
+    route: '/dashboard/jobs',
+    cta: 'Browse jobs',
+  },
+  {
+    icon: <Bell size={20} />,
+    tint: 'pink',
+    title: 'Application tracker',
+    desc: 'Every resume version, outreach mail and status change recorded on one timeline.',
+    points: ['Applied → Interview stages', 'Follow-up reminders', 'Full history per job'],
+    route: '/dashboard/applications',
+    cta: 'Track apps',
+  },
+  {
+    icon: <ShieldCheck size={20} />,
+    tint: 'yellow',
+    title: 'Vault + Chrome extension',
+    desc: 'Hamzo Apply extension fills external ATS forms and reuses your approved answers.',
+    points: ['Answer vault sync', 'One-click form fill', 'Works on Greenhouse, Lever, Ashby'],
+    route: '/dashboard/profile',
+    cta: 'Setup vault',
+  },
+];
+
+const STEPS = [
+  { n: '01', title: 'Connect accounts', desc: 'Link LinkedIn once and connect Gmail with OAuth. Sessions stay isolated per user.', detail: 'LinkedIn login window or li_at cookie · Gmail OAuth refresh tokens · per-user Chrome profiles' },
+  { n: '02', title: 'Pick a job', desc: 'Choose from the board or paste any external job link to analyse it instantly.', detail: 'Greenhouse · Lever · Ashby · Workday · SmartRecruiters auto-detected' },
+  { n: '03', title: 'Tailor + prepare', desc: 'AI builds a one-page resume and drafts personal outreach for the right contacts.', detail: 'Summary rewritten for the role · skills reordered · first-name notes' },
+  { n: '04', title: 'Reach + apply', desc: 'Send connects, send referral mails, then move through the guided apply flow.', detail: 'Exactly the limits you set · every send logged · extension fills ATS forms' },
+  { n: '05', title: 'Track + follow up', desc: 'Watch replies, sync LinkedIn status every 15 min and never miss a follow-up.', detail: 'Background sync · sent-mail log · next-step reminders' },
+];
+
+const REVIEWS = [
+  { name: 'Priya Sharma', initials: 'PS', tint: '#445cf5', role: 'Product Manager', text: 'Outreach, resume versions and follow-ups finally live in one place. I stopped losing recruiter replies in Gmail.' },
+  { name: 'Amir Khan', initials: 'AK', tint: '#16a34a', role: 'Backend Engineer', text: 'The LinkedIn campaign runner saved me hours. Set roles, set limits, and every invite is tracked.' },
+  { name: 'Sarah Jenkins', initials: 'SJ', tint: '#9333ea', role: 'UX Designer', text: 'Resume tailor from a job link is scary good. Three clean one-page formats, keywords included.' },
+  { name: 'Daniel Kim', initials: 'DK', tint: '#ea580c', role: 'Marketing Lead', text: 'Mail summaries + follow-up writer doubled my referral reply rate. No more blank-page anxiety.' },
+  { name: 'Alex Rivera', initials: 'AR', tint: '#0891b2', role: 'Engineering Lead', text: 'Vault + extension fills those endless Workday forms. My applications actually get finished now.' },
+];
+
+const FAQS = [
+  ['What does HAMZO actually automate?', 'LinkedIn connection campaigns, Gmail referral outreach and follow-ups, resume tailoring from a job link, and application tracking. You approve what goes out — nothing sends silently.'],
+  ['How do I connect LinkedIn?', 'Dashboard → LinkedIn → Connect. Either log in via the popup window (2FA works) or paste your li_at cookie. The session is stored per-user and verified before any campaign.'],
+  ['How does Gmail sending work?', 'Connect with Google OAuth on the Mail page, or use an App Password. All sends are logged under Sent, with summarize / reply / follow-up help from Gemini.'],
+  ['Will my master resume be overwritten?', 'No. Your master resume stays intact. HAMZO generates job-specific one-page versions so you always know which PDF went where.'],
+  ['Do I need the Chrome extension?', 'Only for external ATS auto-fill (Greenhouse, Lever, Ashby, Workday). The web dashboard works fully without it. Install from the Extension folder via chrome://extensions → Load unpacked.'],
+];
+
+/* ---------- sections ---------- */
+
+function HmzNav({ onGetStarted, authed }) {
   const [open, setOpen] = useState(false);
-  const navigate = useNavigate();
-  const { isAuthenticated } = useAuth();
-
-  const handleGetStarted = () => {
-    if (isAuthenticated) {
-      navigate('/dashboard');
-    } else {
-      navigate('/auth');
-    }
-  };
-
+  const [scrolled, setScrolled] = useState(false);
+  useEffect(() => {
+    const fn = () => setScrolled(window.scrollY > 24);
+    fn();
+    window.addEventListener('scroll', fn, { passive: true });
+    return () => window.removeEventListener('scroll', fn);
+  }, []);
   return (
-    <nav>
-        <a className="brand" href="#top"><i />HAMZO</a>
-      <div className="navlinks">
-        <a href="#product">Product</a>
-        <a href="#workflow">Workflow</a>
-        <a href="#faq">FAQ</a>
-      </div>
-      <button className="navCta" onClick={handleGetStarted}>
-        {isAuthenticated ? 'Dashboard' : 'Get Started'} <ArrowRight size={15} />
-      </button>
-      <button className="menub" onClick={() => setOpen(!open)}>
-        {open ? <X /> : <Menu />}
-      </button>
-      {open && (
-        <div className="mobileNav">
+    <div className={`hmz-navwrap ${scrolled ? 'is-scrolled' : ''}`}>
+      <div className="hmz-nav">
+        <a className="hmz-brand" href="#top"><span className="hmz-dot" />HAMZO</a>
+        <div className="hmz-links">
           <a href="#product">Product</a>
           <a href="#workflow">Workflow</a>
+          <a href="#reviews">Reviews</a>
           <a href="#faq">FAQ</a>
-          <Button onClick={handleGetStarted}>
-            {isAuthenticated ? 'Dashboard' : 'Get started'}
-          </Button>
+        </div>
+        <div className="hmz-navright">
+          <a className="hmz-ghostlink" href="#workflow">How it works</a>
+          <button className="hmz-cta" onClick={onGetStarted}>{authed ? 'Dashboard' : 'Get started'} <ArrowRight size={15} /></button>
+          <button className="hmz-menubtn" aria-label="Menu" onClick={() => setOpen((v) => !v)}>{open ? <X size={18} /> : <Menu size={18} />}</button>
+        </div>
+      </div>
+      {open && (
+        <div className="hmz-mobile">
+          <a href="#product" onClick={() => setOpen(false)}>Product</a>
+          <a href="#workflow" onClick={() => setOpen(false)}>Workflow</a>
+          <a href="#reviews" onClick={() => setOpen(false)}>Reviews</a>
+          <a href="#faq" onClick={() => setOpen(false)}>FAQ</a>
+          <button className="hmz-cta full" onClick={() => { setOpen(false); onGetStarted(); }}>{authed ? 'Dashboard' : 'Get started'} <ArrowRight size={15} /></button>
         </div>
       )}
-    </nav>
+    </div>
   );
 }
 
-function Hero() {
-  const [run, setRun] = useState(false);
-  const [point, setPoint] = useState({ x: 50, y: 45 });
-  const navigate = useNavigate();
-  const { isAuthenticated } = useAuth();
-
-  const terms = ['Job intelligence', 'Resume tailoring', 'Referral outreach', 'Email outreach', 'Application tracking', 'Follow-up planning'];
-
-  const handleGetStarted = () => {
-    if (isAuthenticated) {
-      navigate('/dashboard');
-    } else {
-      navigate('/auth');
-    }
-  };
-
+function HeroPanel({ activeTab, onTab }) {
   return (
-    <section
-      className="hero editorialHero"
-      id="top"
-      onMouseMove={e => {
-        let r = e.currentTarget.getBoundingClientRect();
-        setPoint({ x: (e.clientX - r.left) / r.width * 100, y: (e.clientY - r.top) / r.height * 100 });
-      }}
-      style={{ '--mx': `${point.x}%`, '--my': `${point.y}%` }}
-    >
-      <div className="heroGlow" />
-      <div className="heroTerms">
-        <div>
-          {[...terms, ...terms].map((term, i) => <span key={i}>{term}</span>)}
-        </div>
-      </div>
-      <div className="heroCopy">
-        <Tag>THE OPPORTUNITY WORKSPACE</Tag>
-        <h1>Your career move,<br /><em>thoughtfully</em> managed.</h1>
-        <p>Wayin connects the application, tailored resume, professional outreach, follow-ups and progress around every opportunity.</p>
-        <div className="actions">
-          <Button onClick={handleGetStarted}>Get started</Button>
-          <a className="textlink" href="#workflow">See how it works <ArrowRight size={16} /></a>
-        </div>
-        <span className="note">A calmer way to move your career forward.</span>
-      </div>
-      <div className={`heroVisual ${run ? 'running' : ''}`}>
-        <div className="jobCard">
-          <div className="cardTop">
-            <span className="companyMark">N</span>
-            <span>New opportunity</span>
-            <span className="dot" />
-          </div>
-          <h3>Software Engineer</h3>
-          <p>Northstar Labs · Bengaluru</p>
-          <div className="skills"><b>Java</b><b>Spring Boot</b><b>SQL</b></div>
-          <button className="agentButton" onClick={() => setRun(true)}>
-            {run ? 'Agent working…' : 'Run Agent'} <Sparkles size={15} />
+    <div className="hmz-panel">
+      <div className="hmz-paneltabs">
+        {TABS.map((t) => (
+          <button key={t.id} onClick={() => onTab(t.id)} className={`hmz-ptab ${activeTab === t.id ? 'on' : ''}`}>
+            {t.icon}{t.label}
           </button>
-        </div>
-        <div className="float people"><Search size={17} /><div><small>PEOPLE</small><strong>3 relevant contacts</strong></div></div>
-        <div className="float email"><Mail size={17} /><div><small>EMAIL</small><strong>{run ? 'Ready to send' : 'Drafting outreach'}</strong></div><Check size={16} /></div>
-        <div className="float applied"><Check size={16} /><div><small>TRACKER</small><strong>Opportunity saved</strong></div></div>
-        <svg className="lines" viewBox="0 0 650 500">
-          <path d="M340 250 C180 190 140 155 70 100" />
-          <path d="M355 260 C510 185 550 155 595 140" />
-          <path d="M350 285 C490 350 525 375 580 380" />
-          <path d="M320 290 C225 375 175 390 100 405" />
-        </svg>
+        ))}
+        <span className="hmz-live"><span className="hmz-pulse" />live</span>
       </div>
-    </section>
+      {activeTab === 'linkedin' && (
+        <div className="hmz-pbody">
+          <div className="hmz-prow"><span className="hmz-cmark">N</span><div><small>NORTHSTAR LABS · RECRUITER</small><b>Send 10 connects</b></div><span className="hmz-pill green">ready</span></div>
+          <div className="hmz-note">Hi Ananya — loved your team&apos;s work on realtime infra. Final-year engineer, 2 backend internships…</div>
+          <div className="hmz-bar"><div className="hmz-fill" style={{ width: '70%' }} />7 / 10 sent</div>
+        </div>
+      )}
+      {activeTab === 'mail' && (
+        <div className="hmz-pbody">
+          <div className="hmz-prow"><Mail size={16} /><div><small>TO HIRING@NORTHSTAR.COM</small><b>Referral request — SDE</b></div><span className="hmz-pill blue">draft</span></div>
+          <div className="hmz-note">Attached: Arjun_Northstar.pdf · Follow-up scheduled in 4 days if no reply…</div>
+          <div className="hmz-actions"><span className="hmz-chipbtn primary"><Send size={13} /> Send</span><span className="hmz-chipbtn"><Sparkles size={13} /> AI rewrite</span></div>
+        </div>
+      )}
+      {activeTab === 'resume' && (
+        <div className="hmz-pbody">
+          <div className="hmz-prow"><FileText size={16} /><div><small>TAILORED FOR NORTHSTAR LABS</small><b>Arjun_Kumar_SDE.pdf</b></div><span className="hmz-pill purple">98% fit</span></div>
+          <div className="hmz-tags"><span>Java</span><span>Spring Boot</span><span>REST</span><span>SQL</span><span>+4</span></div>
+          <div className="hmz-bar"><div className="hmz-fill purple" style={{ width: '92%' }} />12 keywords matched</div>
+        </div>
+      )}
+      {activeTab === 'track' && (
+        <div className="hmz-pbody">
+          {[['Resume tailored', 1], ['Outreach sent', 1], ['Applied', 1], ['Follow up', 0]].map(([label, done]) => (
+            <div key={label} className="hmz-trow">{done ? <Check size={14} /> : <span className="hmz-ring" />}<span>{label}</span>{done ? <small>done</small> : <small className="next">next</small>}</div>
+          ))}
+        </div>
+      )}
+    </div>
   );
 }
 
-const testimonials = [
-  { id: 1, name: "Priya Sharma", handle: "@Veeboo", avatar: "https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150&auto=format&fit=crop&q=80", quote: "\u201CWayin completely changed how I approach job applications. I no longer worry about tracking — everything is captured and managed automatically.\u201D", role: "Product Manager" },
-  { id: 2, name: "Amir Khan", handle: "@Veeboo", avatar: "https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?w=150&auto=format&fit=crop&q=80", quote: "\u201CI was skeptical at first, but Wayin is now essential for my job search. The match scoring helps me focus on the right opportunities.\u201D", role: "Lead Tech Engineer" },
-  { id: 3, name: "Daniel Kim", handle: "@Veeboo", avatar: "https://images.unsplash.com/photo-1517841905240-472988babdf9?w=150&auto=format&fit=crop&q=80", quote: "\u201CThe connected workflow is incredible. Resume, outreach, application — everything lives in one place. I save hours every week.\u201D", role: "Marketing Lead" },
-  { id: 4, name: "Sarah Jenkins", handle: "@Veeboo", avatar: "https://images.unsplash.com/photo-1524504388940-b1c1722653e1?w=150&auto=format&fit=crop&q=80", quote: "\u201CAutomatic follow-up tracking and outreach coordination doubled my response rate. An absolute must-have for serious job seekers.\u201D", role: "Senior UX Designer" },
-  { id: 5, name: "Alex Rivera", handle: "@Veeboo", avatar: "https://images.unsplash.com/photo-1539571696357-5a69c17a67c6?w=150&auto=format&fit=crop&q=80", quote: "\u201CThe seamless integration between Gmail, LinkedIn, and my applications saves me at least 5 hours a week. Extremely intuitive.\u201D", role: "Engineering Lead" },
-];
+function Hero({ onGetStarted }) {
+  const [point, setPoint] = useState({ x: 50, y: 30 });
+  const [tab, setTab] = useState('linkedin');
+  const [statsRef, statsVisible] = useReveal();
+  const sent = useCountUp(12500, statsVisible);
+  const replies = useCountUp(3400, statsVisible);
+  const hours = useCountUp(5, statsVisible);
+  const users = useCountUp(500, statsVisible);
 
-function Social() {
-  const [startIndex, setStartIndex] = useState(0);
-  const handlePrev = () => setStartIndex(prev => (prev === 0 ? testimonials.length - 1 : prev - 1));
-  const handleNext = () => setStartIndex(prev => (prev + 1) % testimonials.length);
-  const visibleCards = [
-    testimonials[startIndex % testimonials.length],
-    testimonials[(startIndex + 1) % testimonials.length],
-    testimonials[(startIndex + 2) % testimonials.length],
-  ];
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      setTab((t) => {
+        const i = TABS.findIndex((x) => x.id === t);
+        return TABS[(i + 1) % TABS.length].id;
+      });
+    }, 4200);
+    return () => window.clearInterval(id);
+  }, []);
 
   return (
-    <section className="socialSection" id="social-proof">
-      <div className="socialAmbientGlow" />
-      <div className="socialContent">
-        <div className="socialBadge"><Heart size={13} fill="#5e65f4" color="#5e65f4" /><span>Social Proof</span></div>
-        <h2>Backed by Our Growing Community<br />of <span className="blueHighlight">Engineers</span></h2>
-        <p className="socialSubtext">Be part of the movement towards smarter, more efficient job searching.</p>
-        <div className="socialTrustRow">
-          <div className="avatarGroup">
-            {testimonials.slice(0, 5).map((t, i) => (
-              <img key={t.id} src={t.avatar} alt={t.name} className={`stackedAvatar av-${i}`} />
-            ))}
+    <div
+      className="hmz-hero"
+      id="top"
+      onMouseMove={(e) => {
+        const r = e.currentTarget.getBoundingClientRect();
+        setPoint({ x: ((e.clientX - r.left) / r.width) * 100, y: ((e.clientY - r.top) / r.height) * 100 });
+      }}
+      style={{ ['--mx']: `${point.x}%`, ['--my']: `${point.y}%` }}
+    >
+      <div className="hmz-glow" />
+      <div className="hmz-marquee"><div>{['JOB INTELLIGENCE', 'LINKEDIN OUTREACH', 'GMAIL FOLLOW-UPS', 'RESUME TAILORING', 'APPLICATION TRACKING', 'ANSWER VAULT', 'JOB INTELLIGENCE', 'LINKEDIN OUTREACH', 'GMAIL FOLLOW-UPS', 'RESUME TAILORING', 'APPLICATION TRACKING', 'ANSWER VAULT'].map((t, i) => <span key={i}>{t}</span>)}</div></div>
+      <div className="hmz-herogrid">
+        <div className="hmz-copy">
+          <span className="hmz-badge"><Zap size={13} /> THE CAREER OPERATING SYSTEM</span>
+          <h1>Every application,<br /><em>outreach</em> &amp; follow-up — in one flow.</h1>
+          <p>HAMZO connects your LinkedIn campaigns, Gmail referrals, tailored resumes and tracker around every job. Deliberate, visible, and always under your control.</p>
+          <div className="hmz-actions">
+            <button className="hmz-cta big" onClick={onGetStarted}>Start free <ArrowUpRight size={16} /></button>
+            <a className="hmz-textlink" href="#workflow">See how it works <ArrowRight size={15} /></a>
           </div>
-          <span className="trustText">Trusted by <b>500+</b> professionals and growing.</span>
+          <div className="hmz-trust">
+            <div className="hmz-avatars">{['PS', 'AK', 'SJ', 'DK', '+'].map((t, i) => <span key={i} className={`hmz-av a${i}`}>{t}</span>)}</div>
+            <span>Trusted by <b>{users}+ professionals</b> · no credit card</span>
+          </div>
         </div>
-        <div className="cardsCarouselContainer">
-          <div className="cardsRow">
-            {visibleCards.map((card, idx) => (
-              <article key={`${card.id}-${idx}`} className="testimonialCard">
-                <div className="cardTopRow">
-                  <img src={card.avatar} alt={card.name} className="authorAvatar" />
-                  <div className="authorInfo">
-                    <span className="authorName">{card.name}</span>
-                    <span className="authorHandle">{card.handle}</span>
-                  </div>
-                </div>
-                <p className="quoteBody">{card.quote}</p>
-                <div className="cardBottomRow"><span className="roleTitle">{card.role}</span></div>
-              </article>
-            ))}
-          </div>
-          <div className="carouselNavButtons">
-            <button onClick={handlePrev} className="carouselBtn" aria-label="Previous"><ChevronLeft size={18} /></button>
-            <button onClick={handleNext} className="carouselBtn" aria-label="Next"><ChevronRight size={18} /></button>
-          </div>
+        <div className="hmz-visual">
+          <HeroPanel activeTab={tab} onTab={setTab} />
+          <div className="hmz-float f1"><Users size={16} /><div><small>CONTACTS</small><strong>3 relevant people</strong></div></div>
+          <div className="hmz-float f2"><Check size={15} /><div><small>SYNC</small><strong>LinkedIn verified</strong></div></div>
         </div>
       </div>
-    </section>
+      <div className="hmz-stats" ref={statsRef}>
+        {[
+          [`${sent.toLocaleString('en-IN')}+`, 'Outreach messages prepared'],
+          [`${replies.toLocaleString('en-IN')}+`, 'Replies tracked'],
+          [`${hours} hrs`, 'Saved every week'],
+          [`${users}+`, 'Professionals onboard'],
+        ].map(([v, l]) => (
+          <div key={l} className="hmz-stat"><b>{v}</b><span>{l}</span></div>
+        ))}
+      </div>
+    </div>
   );
 }
 
-function Problem() {
+function ProductGrid({ onOpen }) {
+  const [ref, visible] = useReveal();
   return (
-    <section className="problem">
-      <div className="problemIntro">
-        <Tag>THE OLD WAY</Tag>
-        <h2>Applying is easy.<br /><em>Managing</em> it isn't.</h2>
-        <p>A single opportunity fractures across tabs, files, inboxes and reminders. The work that gets you noticed is the work that is hardest to hold together.</p>
+    <div className="hmz-section" id="product" ref={ref}>
+      <div className={`hmz-head ${visible ? 'show' : ''}`}>
+        <span className="hmz-kicker">THE HAMZO AGENT</span>
+        <h2>One workspace.<br />Your entire <em>opportunity.</em></h2>
+        <p>Everything the backend already does — exposed as one calm dashboard instead of ten tabs.</p>
       </div>
-      <div className="scatter">
-        <article className="scrap s1"><small>LINKEDIN</small><b>Connection request sent</b><span>When should I follow up?</span></article>
-        <article className="scrap s2"><small>GMAIL</small><b>Recruiter reply</b><span>Which application was this for?</span></article>
-        <article className="scrap s3"><small>SPREADSHEET</small><b>100+ applications</b><span>Which resume did I use?</span></article>
-        <article className="scrap s4"><small>JOB PORTAL</small><b>Application status</b><span>Submitted 12 days ago</span></article>
-        <div className="chaosline">job portal <i /> resume <i /> linkedin <i /> gmail <i /> spreadsheet</div>
-      </div>
-      <div className="connected"><span>From scattered workflow</span><ArrowRight /><b>One connected opportunity.</b></div>
-    </section>
-  );
-}
-
-const features = [
-  ['01', 'JOB INTELLIGENCE', 'Find what matters in every description', 'requirements'],
-  ['02', 'SMART RESUME', 'Tailor the right version, not your whole story', 'match'],
-  ['03', 'REFERRAL OUTREACH', 'Prepare personal outreach with context', 'people'],
-  ['04', 'EMAIL OUTREACH', 'Keep conversations attached to the opportunity', 'emailv'],
-  ['05', 'APPLICATION', 'Move into the appropriate application flow', 'applyv'],
-  ['06', 'FOLLOW-UP', 'See what needs your attention next', 'followv'],
-  ['07', 'APPLICATION MEMORY', 'Remember every action and document used', 'memory'],
-  ['08', 'UNIFIED TRACKER', 'Every opportunity, with its full history', 'trackv'],
-];
-
-function Mini({ type }) {
-  if (type === 'requirements') return <div className="mini req"><span>We're looking for an engineer with</span><b>Java · Spring Boot</b><b>REST APIs · SQL</b><span>and a sharp product instinct.</span></div>;
-  if (type === 'match') return <div className="mini match"><span>Job description</span><b>Java</b><b>Spring Boot</b><span>Resume</span><b>Java <Check /></b><b>Spring Boot <Check /></b></div>;
-  if (type === 'people') return <div className="mini contacts"><div><i>AP</i> Ananya Patel <Check /></div><div><i>RK</i> Rohan Khanna <Check /></div><div><i>SM</i> Sia Mehta <Check /></div></div>;
-  if (type === 'emailv') return <div className="mini message"><small>To: hiring@northstar.com</small><b>Thoughts on the platform role</b><span>Hi Maya, I'm excited by how…</span><Send /></div>;
-  if (type === 'applyv') return <div className="mini submit"><div><Check /></div><b>Application submitted</b><span>Northstar Labs · just now</span></div>;
-  if (type === 'followv') return <div className="mini timeline"><b /><b /><b className="active" /><span>Applied</span><span>Reached out</span><span>Follow up</span></div>;
-  if (type === 'memory') return <div className="mini mem"><span>Resume v4 — used</span><span>Outreach — sent</span><span>Application — submitted</span></div>;
-  return <div className="mini board"><span><i />Applied</span><span><i />Outreach</span><span><i />Interview</span></div>;
-}
-
-function Solution() {
-  return (
-    <section className="solution" id="product">
-      <div className="sectionHeading">
-        <Tag>THE WAYIN AGENT</Tag>
-        <h2>One Agent.<br />Your entire <em>opportunity.</em></h2>
-        <p>Give Wayin a job. It keeps the supported work around it coordinated, visible and deliberate.</p>
-      </div>
-      <div className="featureGrid">
-        {features.map(([n, t, d, v], i) => (
-          <article className={`feature f${i}`} key={n}>
-            <div className="featureMeta"><span>{n}</span><small>{t}</small></div>
-            <h3>{d}</h3>
-            <Mini type={v} />
+      <div className="hmz-grid">
+        {FEATURES.map((f) => (
+          <article key={f.title} className={`hmz-card tint-${f.tint}`}>
+            <div className="hmz-cardicon">{f.icon}</div>
+            <h3>{f.title}</h3>
+            <p>{f.desc}</p>
+            <ul>{f.points.map((p) => <li key={p}><Check size={13} />{p}</li>)}</ul>
+            <button className="hmz-cardbtn" onClick={() => onOpen(f.route)}>{f.cta} <ArrowRight size={14} /></button>
           </article>
         ))}
       </div>
-    </section>
+    </div>
   );
 }
-
-const stages = [
-  ['01', 'JOB FOUND', 'A promising role arrives.'],
-  ['02', 'UNDERSTAND', 'The details come into focus.'],
-  ['03', 'TAILOR', 'Your experience meets the moment.'],
-  ['04', 'REACH', 'The right people, thoughtfully approached.'],
-  ['05', 'APPLY', 'A considered application moves forward.'],
-  ['06', 'TRACK', 'Every next step stays visible.'],
-];
 
 function Workflow() {
-  const [stage, setStage] = useState(0);
+  const [step, setStep] = useState(0);
+  const [paused, setPaused] = useState(false);
   useEffect(() => {
-    const f = () => {
-      let e = document.getElementById('workflow');
-      if (e) {
-        let n = Math.max(0, Math.min(5, Math.floor((window.scrollY - e.offsetTop + window.innerHeight * 0.35) / (e.offsetHeight / 6))));
-        setStage(n);
-      }
-    };
-    window.addEventListener('scroll', f);
-    f();
-    return () => window.removeEventListener('scroll', f);
-  }, []);
-
-  let s = stages[stage];
-
+    if (paused) return;
+    const id = window.setInterval(() => setStep((s) => (s + 1) % STEPS.length), 3200);
+    return () => window.clearInterval(id);
+  }, [paused]);
+  const s = STEPS[step];
   return (
-    <section className="workflow" id="workflow">
-      <div className="workflowSticky">
-        <div className="workCopy">
-          <Tag>THE WORKFLOW</Tag>
-          <h2>Give it a job.<br />Watch it <em>unfold.</em></h2>
-          <div className="stepLabel">
-            <span>{s[0]}</span>
-            <b>{s[1]}</b>
-            <p>{s[2]}</p>
-          </div>
-          <div className="steps">
-            {stages.map((x, i) => (
-              <button onClick={() => setStage(i)} className={i === stage ? 'on' : ''} key={x[0]}>{x[0]}</button>
-            ))}
-          </div>
-        </div>
-        <div className={`workPanel stage${stage}`}>
-          <div className="workJob">
-            <span className="companyMark">N</span>
-            <div><small>NORTHSTAR LABS</small><b>Software Engineer</b><span>Bengaluru · Full Time</span></div>
-          </div>
-          {stage >= 1 && <div className="workReq">Java <b>Spring Boot</b> SQL <b>REST APIs</b> Git</div>}
-          {stage >= 2 && <div className="workResume"><FileText /><div><b>Arjun_Kumar_Northstar.pdf</b><span>Tailored for this role</span></div><Check /></div>}
-          {stage >= 3 && <div className="workReach"><AtSign /><span>3 relevant contacts found</span><Mail /><span>Outreach prepared</span></div>}
-          {stage >= 4 && <div className="workSubmit"><Check /> Application submitted <small>Today, 10:42 AM</small></div>}
-          {stage >= 5 && <div className="workTrack"><span>Applied <Check /></span><span>Outreach <Check /></span><span>Follow up <i /></span><span>Response</span></div>}
-        </div>
+    <div className="hmz-work" id="workflow" onMouseEnter={() => setPaused(true)} onMouseLeave={() => setPaused(false)}>
+      <div className="hmz-workcopy">
+        <span className="hmz-kicker light">THE WORKFLOW</span>
+        <h2>Paste a job.<br />Watch it <em>unfold.</em></h2>
+        <div className="hmz-stepnum">{s.n}</div>
+        <h3>{s.title}</h3>
+        <p>{s.desc}</p>
+        <code>{s.detail}</code>
+        <div className="hmz-stepbtns">{STEPS.map((x, i) => <button key={x.n} onClick={() => setStep(i)} className={i === step ? 'on' : ''} aria-label={x.title}>{x.n}</button>)}</div>
       </div>
-    </section>
+      <div className="hmz-workpanel">
+        <div className="hmz-wjob"><span className="hmz-cmark">N</span><div><small>NORTHSTAR LABS</small><b>Software Engineer</b><span>Bengaluru · Full-time</span></div></div>
+        <div className="hmz-wtags">{['Java', 'Spring Boot', 'SQL', 'REST'].map((t) => <span key={t}>{t}</span>)}</div>
+        {step >= 2 && <div className="hmz-wrow anim"><FileText size={15} /><div><b>Arjun_Northstar.pdf</b><span>Tailored · 98% match</span></div><Check size={15} /></div>}
+        {step >= 3 && <div className="hmz-wrow anim"><Send size={14} /><div><b>3 contacts · outreach ready</b><span>First-name notes included</span></div></div>}
+        {step >= 4 && <div className="hmz-wok anim"><Check size={14} /> Application + follow-up scheduled <small>Today</small></div>}
+        <div className="hmz-progress"><div style={{ width: `${((step + 1) / STEPS.length) * 100}%` }} /></div>
+      </div>
+    </div>
   );
 }
 
-const faqs = [
-  ['What does the Agent actually do?', 'It helps coordinate the supported work around a job: understanding the role, tailoring materials, preparing outreach, recording activity and keeping your next step visible.'],
-  ['Can I connect my Gmail and LinkedIn?', 'Connected workflows depend on the integrations available to your account. You stay in control of what is prepared, sent and recorded.'],
-  ['Will my resume be changed permanently?', 'No. Your master resume stays intact. Wayin creates job-specific versions so you can always see exactly what was used.'],
-  ['Does the Agent automatically apply to every job?', 'No. Application routes and supported workflows vary by target platform. Wayin is designed to keep you deliberate, not indiscriminate.'],
-  ['Can I see everything the Agent has done?', 'Yes. Each opportunity has a clear timeline of resumes, outreach, applications and follow-up actions.'],
-];
+function Reviews() {
+  const [idx, setIdx] = useState(0);
+  const [perView, setPerView] = useState(3);
+  useEffect(() => {
+    const fn = () => setPerView(window.innerWidth < 760 ? 1 : 3);
+    fn();
+    window.addEventListener('resize', fn);
+    return () => window.removeEventListener('resize', fn);
+  }, []);
+  useEffect(() => {
+    const id = window.setInterval(() => setIdx((i) => (i + 1) % REVIEWS.length), 5000);
+    return () => window.clearInterval(id);
+  }, []);
+  const visible = Array.from({ length: perView }, (_, k) => REVIEWS[(idx + k) % REVIEWS.length]);
+  return (
+    <div className="hmz-section light" id="reviews">
+      <div className="hmz-head center">
+        <span className="hmz-kicker">SOCIAL PROOF</span>
+        <h2>Loved by people<br />doing <em>serious</em> job search.</h2>
+      </div>
+      <div className="hmz-revrow">
+        {visible.map((r, k) => (
+          <article key={`${r.name}-${k}`} className="hmz-rev anim-in">
+            <div className="hmz-revtop"><span className="hmz-ravatar" style={{ background: r.tint }}>{r.initials}</span><div><b>{r.name}</b><small>{r.role}</small></div></div>
+            <p>“{r.text}”</p>
+          </article>
+        ))}
+      </div>
+      <div className="hmz-revnav">
+        <button aria-label="Previous" onClick={() => setIdx((i) => (i - 1 + REVIEWS.length) % REVIEWS.length)}><ChevronLeft size={17} /></button>
+        <span>{idx + 1} / {REVIEWS.length}</span>
+        <button aria-label="Next" onClick={() => setIdx((i) => (i + 1) % REVIEWS.length)}><ChevronRight size={17} /></button>
+      </div>
+    </div>
+  );
+}
 
-function FAQ() {
+function Faq() {
   const [open, setOpen] = useState(0);
   return (
-    <section className="faq" id="faq">
-      <div>
-        <Tag>FAQ</Tag>
-        <h2>Questions before<br />you get <em>started?</em></h2>
-      </div>
-      <div className="accord">
-        {faqs.map(([q, a], i) => (
+    <div className="hmz-faq" id="faq">
+      <div><span className="hmz-kicker">FAQ</span><h2>Questions before<br />you <em>start?</em></h2><p className="hmz-muted">Backend runs on port 3000 · frontend on 5173 · Chrome required for automation.</p></div>
+      <div className="hmz-acc">
+        {FAQS.map(([q, a], i) => (
           <article key={q} className={open === i ? 'open' : ''}>
-            <button onClick={() => setOpen(open === i ? -1 : i)}>{q}<ChevronDown /></button>
+            <button onClick={() => setOpen(open === i ? -1 : i)}>{q}<ChevronDown size={17} /></button>
             <p>{a}</p>
           </article>
         ))}
       </div>
-    </section>
+    </div>
   );
 }
 
-function Final() {
-  const navigate = useNavigate();
-  const { isAuthenticated } = useAuth();
-
-  const handleGetStarted = () => {
-    if (isAuthenticated) {
-      navigate('/dashboard');
-    } else {
-      navigate('/auth');
-    }
-  };
-
+function FinalCta({ onGetStarted }) {
   return (
-    <section className="final" id="cta">
-      <div className="finalCopy">
-        <Tag>YOUR NEXT MOVE</Tag>
-        <h2>Your next opportunity<br />deserves more than<br /><em>an application.</em></h2>
-        <p>Bring your application, resume, outreach, follow-ups and progress into one connected workflow.</p>
-        <div className="actions">
-          <Button onClick={handleGetStarted}>Get started</Button>
-          <a className="textlink light" href="#top">Sign in <ArrowRight size={16} /></a>
+    <div className="hmz-final" id="cta">
+      <div>
+        <span className="hmz-kicker light">YOUR NEXT MOVE</span>
+        <h2>Your next role deserves more than <em>an application.</em></h2>
+        <p>Bring LinkedIn, Gmail, resume, tracker and vault into one connected workflow.</p>
+        <div className="hmz-actions">
+          <button className="hmz-cta big light" onClick={onGetStarted}>Get started free <ArrowUpRight size={16} /></button>
+          <span className="hmz-chrome"><Globe size={15} /> Chrome extension included</span>
         </div>
       </div>
-      <div className="complete">
-        <div className="completeHead"><i /> Northstar Labs <span>Active</span></div>
-        {['Resume tailored', 'Outreach sent', 'Application submitted', 'Reply received', 'Interview'].map((x, i) => (
-          <div className={i === 4 ? 'current' : ''} key={x}>
-            {i < 4 ? <Check /> : <i />}
-            <span>{x}</span>
-            {i === 4 && <small>Next Tuesday</small>}
-          </div>
+      <div className="hmz-complete">
+        <div className="hmz-chead"><span className="hmz-sq" /> Northstar Labs <span className="hmz-active">Active</span></div>
+        {['Resume tailored', 'Outreach sent', 'Application submitted', 'Reply received'].map((x) => (
+          <div key={x} className="hmz-crow"><Check size={14} /><span>{x}</span></div>
         ))}
+        <div className="hmz-crow current"><span className="hmz-ring" /><span>Interview</span><small>Next Tue</small></div>
       </div>
-      <footer>
-      <a className="brand" href="#top"><i />HAMZO</a>
-        <span>© 2026 Wayin</span>
-        <div><a>About</a><a>Contact</a><a>Privacy</a><a>Terms</a></div>
-      </footer>
-    </section>
+      <div className="hmz-footer">
+        <a className="hmz-brand light" href="#top"><span className="hmz-dot" />HAMZO</a>
+        <span>© 2026 Hamzo · Career Operating System</span>
+        <div><a href="#product">Product</a><a href="#workflow">Workflow</a><a href="#faq">FAQ</a></div>
+      </div>
+    </div>
   );
 }
 
 export default function Landing() {
-  const [isLoading, setIsLoading] = useState(true);
+  const [loading, setLoading] = useState(true);
+  const navigate = useNavigate();
+  const { isAuthenticated } = useAuth();
 
   useEffect(() => {
-    const start = performance.now();
-    let finished = false;
-    const finish = () => {
-      if (finished) return;
-      finished = true;
-      const remaining = Math.max(0, 900 - (performance.now() - start));
-      window.setTimeout(() => setIsLoading(false), remaining);
-    };
-
-    if (document.readyState === 'complete') {
-      const t = window.setTimeout(finish, 400);
-      window.addEventListener('load', finish, { once: true });
-      return () => {
-        window.clearTimeout(t);
-        window.removeEventListener('load', finish);
-      };
-    }
-
-    window.addEventListener('load', finish, { once: true });
-    const fallback = window.setTimeout(finish, 3000);
-    return () => {
-      window.removeEventListener('load', finish);
-      window.clearTimeout(fallback);
-    };
+    const t = window.setTimeout(() => setLoading(false), 900);
+    return () => window.clearTimeout(t);
   }, []);
 
+  const go = useCallback((route) => {
+    if (route) { navigate(route); return; }
+    navigate(isAuthenticated ? '/dashboard' : '/auth');
+  }, [navigate, isAuthenticated]);
+
   return (
-    <>
-      <VideoLoader isLoading={isLoading} />
-      <Nav />
+    <div className="hmz-page">
+      <VideoLoader isLoading={loading} maxWaitMs={2200} fadeDurationMs={350} />
+      <HmzNav onGetStarted={() => go()} authed={isAuthenticated} />
       <main>
-        <Hero />
-        <Social />
-        <Problem />
-        <Solution />
+        <Hero onGetStarted={() => go()} />
+        <ProductGrid onOpen={(r) => go(isAuthenticated ? r : undefined)} />
         <Workflow />
-        <FAQ />
-        <Final />
+        <Reviews />
+        <Faq />
+        <FinalCta onGetStarted={() => go()} />
       </main>
-    </>
+    </div>
   );
 }

@@ -275,6 +275,10 @@ export default function JobAnalyzerModal({ isOpen, onClose, initialUrl = '', onA
         text: tailoredData.plainText || '',
         pdfBase64: chosen.pdfBase64,
         jobUrl: tailoredData.job?.applyUrl || tailoredData.job?.url || jobUrl,
+        jobId: targetJob.id,
+        company: companyName,
+        title: jobTitle,
+        isActive: true,
       });
 
       // Find or register the job in adminJobStore so Apply page can load it

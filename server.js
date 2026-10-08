@@ -12,6 +12,8 @@ import { LinkedInTrackerEngine, setLiveSearchSessionDir } from './lib/tracker-en
 import { LinkedInSessionManager } from './lib/session-manager.js';
 import { db } from './lib/db.js';
 import { handleRagChat } from './lib/rag-assistant.js';
+import { AutoApplyEngine } from './lib/auto-apply-engine.js';
+import { getAllAnswers, saveVaultAnswer, findSimilarAnswer, normalizeQuestion } from './lib/vault-manager.js';
 
 import nodemailer from 'nodemailer';
 import { GoogleGenerativeAI } from '@google/generative-ai';
@@ -751,6 +753,47 @@ function extractApplyUrl(html, baseUrl) {
   return '';
 }
 
+function prettifyCompanySlug(slug) {
+  const key = String(slug || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  const known = {
+    angelone: 'Angel One',
+    angel1: 'Angel One',
+  };
+  if (known[key]) return known[key];
+  return String(slug || '')
+    .replace(/[-_]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+const ATS_HOST_HINTS = new Set([
+  'greenhouse', 'lever', 'ashbyhq', 'ashby', 'myworkdayjobs', 'workday',
+  'smartrecruiters', 'icims', 'workable', 'jobvite', 'taleo', 'mynexthire',
+  'nextHire'.toLowerCase(), 'successfactors', 'oraclecloud', 'eightfold',
+  'phenom', 'zoho', 'breezy', 'workable', 'careers',
+]);
+
+function companyFromHostname(hostname) {
+  const host = String(hostname || '').toLowerCase().replace(/^www\./, '');
+  if (!host) return '';
+  const parts = host.split('.').filter(Boolean);
+  // drop TLD + eTLD-ish tail (com, io, co, in...)
+  const tlds = new Set(['com', 'io', 'co', 'in', 'org', 'net', 'ai', 'jobs', 'careers']);
+  while (parts.length > 1 && tlds.has(parts[parts.length - 1])) parts.pop();
+  // drop known ATS middle labels
+  const filtered = parts.filter((p) => !ATS_HOST_HINTS.has(p));
+  const slug = filtered[0] || parts[0] || '';
+  if (!slug || slug === 'localhost' || /^\d+\.\d+\.\d+\.\d+$/.test(slug)) return '';
+  return prettifyCompanySlug(slug);
+}
+
+function domainFromHostname(hostname) {
+  const host = String(hostname || '').toLowerCase().replace(/^www\./, '');
+  if (!host || host === 'localhost' || host.startsWith('127.') || host.startsWith('10.') || host.startsWith('192.168.')) return '';
+  return host;
+}
+
 function cleanTitleText(str) {
   if (!str) return '';
   return String(str)
@@ -773,80 +816,108 @@ function cleanTitleText(str) {
     .trim();
 }
 
-function extractJobMetadata(html, rawUrl) {
+function extractJobMetadata(html, rawUrl, plainText = '') {
   let title = '';
   let company = '';
   let logo = '';
-  let location = 'Hybrid';
+  let location = '';
 
   try {
     const urlObj = new URL(rawUrl);
     const hostname = urlObj.hostname.replace(/^www\./, '');
-    let domain = hostname;
+    const domain = domainFromHostname(hostname);
 
+    // 1) Company: prefer ATS path slug (greenhouse/lever/ashby/workday), else hostname.
+    // e.g. angelone.mynexthire.com -> "Angel One" (NOT mynexthire, NOT Cloudflare)
     if (hostname.includes('greenhouse.io') || hostname.includes('lever.co') || hostname.includes('ashbyhq.com') || hostname.includes('myworkdayjobs.com')) {
       const parts = urlObj.pathname.split('/').filter(Boolean);
       if (parts.length > 0 && !['jobs', 'embed'].includes(parts[0])) {
-        company = parts[0];
-        domain = `${parts[0]}.com`;
-      }
-    } else {
-      const hostParts = hostname.split('.');
-      company = hostParts.length > 2 ? hostParts[hostParts.length - 2] : hostParts[0];
-      domain = hostname;
-    }
-
-    const ogTitleMatch = html.match(/<meta\s+(?:property|name)=["'](?:og|twitter):title["']\s+content=["']([^"']+)["']/i) ||
-                         html.match(/<meta\s+content=["']([^"']+)["']\s+(?:property|name)=["'](?:og|twitter):title["']/i);
-    const h1Match = html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i);
-    const titleTagMatch = html.match(/<title[^>]*>([^<]*)<\/title>/i);
-
-    let rawTitle = ogTitleMatch?.[1] || h1Match?.[1] || titleTagMatch?.[1] || '';
-    rawTitle = cleanTitleText(rawTitle);
-
-    if (rawTitle) {
-      if (rawTitle.includes(' - ')) {
-        const parts = rawTitle.split(' - ');
-        title = parts[0].trim();
-        if (!company && parts[1]) company = parts[1].replace(/Careers|Jobs/i, '').trim();
-      } else if (rawTitle.includes(' at ')) {
-        const parts = rawTitle.split(' at ');
-        title = parts[0].trim();
-        if (!company && parts[1]) company = parts[1].trim();
-      } else {
-        title = rawTitle;
+        company = prettifyCompanySlug(parts[0]);
       }
     }
+    if (!company) company = companyFromHostname(hostname);
 
-    if (company) {
-      company = company.replace(/[-_]/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
-    } else {
-      company = 'Cloudflare';
+    // 2) Company hint from page text: "About Angel One:" / "at Angel One" beats hostname guess.
+    const aboutMatch = (plainText || html).match(/About\s+([A-Z][A-Za-z0-9&.'\- ]{2,40})\s*:/);
+    if (aboutMatch && aboutMatch[1] && !/department|role|job|team/i.test(aboutMatch[1])) {
+      company = aboutMatch[1].trim();
     }
 
-    const ogImageMatch = html.match(/<meta\s+(?:property|name)=["'](?:og|twitter):image["']\s+content=["']([^"']+)["']/i) ||
-                         html.match(/<meta\s+content=["']([^"']+)["']\s+(?:property|name)=["'](?:og|twitter):image["']/i);
-    if (ogImageMatch?.[1] && /^https?:\/\//i.test(ogImageMatch[1]) && !ogImageMatch[1].includes('default') && !ogImageMatch[1].includes('avatar')) {
-      logo = ogImageMatch[1];
-    } else {
+    // 3) Title candidates, in priority order (covers SPA shells like mynexthire).
+    const candidates = [];
+    const ogTitle = html.match(/<meta\s+(?:property|name)=["'](?:og|twitter):title["']\s+content=["']([^"']+)["']/i) ||
+      html.match(/<meta\s+content=["']([^"']+)["']\s+(?:property|name)=["'](?:og|twitter):title["']/i);
+    if (ogTitle?.[1]) candidates.push(ogTitle[1]);
+    // JSON-LD: "jobTitle" / "title" / "name"
+    const ldBlocks = [...String(html).matchAll(/<script[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi)].map((m) => m[1]);
+    for (const block of ldBlocks) {
+      try {
+        const json = JSON.parse(block);
+        const items = Array.isArray(json) ? json : [json];
+        for (const item of items) {
+          const t = item?.jobTitle || item?.title || (typeof item?.name === 'string' && item.name);
+          if (t && String(t).length < 120) candidates.push(String(t));
+          const hiringOrg = item?.hiringOrganization?.name;
+          if (hiringOrg && !company) company = String(hiringOrg).trim();
+        }
+      } catch {}
+    }
+    // __NEXT_DATA__ / embedded state (mynexthire, Next.js boards)
+    const nextData = html.match(/<script[^>]*id=["']__NEXT_DATA__["'[^>]*>([\s\S]*?)<\/script>/i);
+    if (nextData?.[1]) {
+      const m = nextData[1].match(/"(?:jobTitle|title|job_title|positionName)"\s*:\s*"([^"]{3,100})"/);
+      if (m?.[1]) candidates.push(m[1]);
+    }
+    const anyJobKey = html.match(/"(?:jobTitle|job_title|positionName)"\s*:\s*"([^"]{3,100})"/);
+    if (anyJobKey?.[1]) candidates.push(anyJobKey[1]);
+    const h1 = html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i);
+    if (h1?.[1]) candidates.push(h1[1]);
+    const h2job = html.match(/<h2[^>]*>([^<]{4,100}(?:Intern|Engineer|Developer|Manager|Executive|Analyst|Designer|Specialist|Lead|Associate)[^<]{0,40})<\/h2>/i);
+    if (h2job?.[1]) candidates.push(h2job[1]);
+    const titleTag = html.match(/<title[^>]*>([^<]*)<\/title>/i);
+    if (titleTag?.[1]) candidates.push(titleTag[1]);
+    // Plain-text pattern: "Agentic AI Intern" + "ID: 7189 | Fresher | Bengaluru"
+    const textBlob = String(plainText || '');
+    const idLine = textBlob.match(/^([A-Z][A-Za-z0-9&+\-./ ]{3,80})\s*\n\s*ID\s*:/m);
+    if (idLine?.[1]) candidates.push(idLine[1]);
+
+    for (const cand of candidates) {
+      const cleaned = cleanTitleText(cand);
+      if (!cleaned || cleaned.length < 3 || cleaned.length > 110) continue;
+      if (/^(home|jobs|careers|job search|back to jobs)$/i.test(cleaned)) continue;
+      let t = cleaned;
+      if (t.includes(' - ')) t = t.split(' - ')[0].trim();
+      else if (t.includes(' | ')) t = t.split(' | ')[0].trim();
+      else if (/\s+at\s+/i.test(t)) t = t.split(/\s+at\s+/i)[0].trim();
+      if (t.length >= 3) { title = t; break; }
+    }
+
+    // 4) Logo: og:image else clearbit of the REAL domain (not hardcoded).
+    const ogImage = html.match(/<meta\s+(?:property|name)=["'](?:og|twitter):image["']\s+content=["']([^"']+)["']/i) ||
+      html.match(/<meta\s+content=["']([^"']+)["']\s+(?:property|name)=["'](?:og|twitter):image["']/i);
+    if (ogImage?.[1] && /^https?:\/\//i.test(ogImage[1]) && !ogImage[1].includes('default') && !ogImage[1].includes('avatar')) {
+      logo = ogImage[1];
+    } else if (domain) {
       logo = `https://logo.clearbit.com/${domain}`;
     }
 
-    if (/hybrid/i.test(html)) location = 'Hybrid';
-    else if (/remote/i.test(html)) location = 'Remote';
-    else if (/on-site|onsite|in-office/i.test(html)) location = 'On-site';
-    else if (/bengaluru|bangalore|india|hyderabad|mumbai|gurugram|delhi/i.test(html)) {
-      location = 'Bengaluru';
-    }
+    // 5) Location from text (default Hybrid only when nothing found).
+    if (/hybrid/i.test(textBlob)) location = 'Hybrid';
+    else if (/remote/i.test(textBlob)) location = 'Remote';
+    else if (/on-site|onsite|in-office/i.test(textBlob)) location = 'On-site';
+    else if (/bengaluru|bangalore/i.test(textBlob)) location = 'Bengaluru';
+    else if (/hyderabad/i.test(textBlob)) location = 'Hyderabad';
+    else if (/mumbai/i.test(textBlob)) location = 'Mumbai';
+    else if (/chennai|delhi|gurugram|pune|kolkata|ahmedabad/i.test(textBlob)) location = textBlob.match(/chennai|delhi|gurugram|pune|kolkata|ahmedabad/i)[0].replace(/^\w/, (c) => c.toUpperCase());
 
   } catch (e) {
     console.warn('Metadata extraction warning:', e.message);
   }
 
   return {
-    title: cleanTitleText(title) || 'Senior Named Account Executive, Bengaluru',
-    company: company || 'Cloudflare',
-    logo: logo || 'https://logo.clearbit.com/cloudflare.com',
+    title: cleanTitleText(title) || 'Software Engineer',
+    company: (company || '').trim() || 'Company',
+    logo: logo || '',
     location: location || 'Hybrid'
   };
 }
@@ -865,7 +936,6 @@ async function fetchJobText(url) {
   if (!res.ok || isJobErrorPage(res.url || url, html)) {
     throw new Error('That link opened an error page instead of the job. Paste the job posting address from the browser address bar.');
   }
-  const meta = extractJobMetadata(html, res.url || url);
   const text = html
     .replace(/<script[\s\S]*?<\/script>/gi, ' ')
     .replace(/<style[\s\S]*?<\/style>/gi, ' ')
@@ -873,6 +943,7 @@ async function fetchJobText(url) {
     .replace(/\s+/g, ' ')
     .trim()
     .slice(0, 12000);
+  const meta = extractJobMetadata(html, res.url || url, text);
   return { text, openUrl: url, applyUrl: extractApplyUrl(html, res.url || url), meta };
 }
 
@@ -923,11 +994,11 @@ Job page text: ${jobText.slice(0, 6000)}`;
                          jobText.match(/([A-Z][a-zA-Z\s]{3,35}(?:Engineer|Developer|Manager|Executive|Intern|Architect|Analyst))/);
       const fallbackTitle = titleMatch ? titleMatch[1].trim() : 'Software Engineer';
       
-      // Extract company name from job text or URL
-      let fallbackCompany = 'Company';
+      // Extract company name from job text or URL (never hardcode a company)
+      let fallbackCompany = fetched.meta?.company && fetched.meta.company !== 'Company' ? fetched.meta.company : 'Company';
       try {
-        const hostname = new URL(jobUrl.toString()).hostname.replace(/^www\./, '');
-        fallbackCompany = hostname.split('.')[0].toUpperCase();
+        const hostCompany = companyFromHostname(new URL(jobUrl.toString()).hostname);
+        if (hostCompany) fallbackCompany = hostCompany;
       } catch {}
 
       const companyMatch = jobText.match(/(?:at|company|organization)[:\s]+([A-Z][a-zA-Z0-9\s]{2,20})/i);
@@ -974,9 +1045,18 @@ Job page text: ${jobText.slice(0, 6000)}`;
     for (const format of formats) {
       format.pdfBase64 = await renderResumePdf(safeProfile, fitted, format.style);
     }
-    const finalTitle = cleanTitleText(parsed.title) || fetched.meta?.title || 'Senior Named Account Executive, Bengaluru';
-    const finalCompany = parsed.company || fetched.meta?.company || 'Cloudflare';
-    const finalLogo = fetched.meta?.logo || `https://logo.clearbit.com/${finalCompany.toLowerCase().replace(/\s+/g, '')}.com`;
+    // Guard: never let a stale/hallucinated company (e.g. old Cloudflare default)
+    // override what the URL + page text actually say.
+    const hostCompany = companyFromHostname(new URL(jobUrl.toString()).hostname);
+    if (parsed && /cloudflare/i.test(parsed.company || '') && hostCompany && !/cloudflare/i.test(hostCompany)) {
+      parsed.company = hostCompany;
+    }
+    if (parsed && /senior named account executive/i.test(parsed.title || '') && fetched.meta?.title && !/senior named account executive/i.test(fetched.meta.title)) {
+      parsed.title = fetched.meta.title;
+    }
+    const finalTitle = cleanTitleText(parsed.title) || fetched.meta?.title || 'Software Engineer';
+    const finalCompany = (parsed.company && parsed.company !== 'Company' ? parsed.company : '') || fetched.meta?.company || hostCompany || 'Company';
+    const finalLogo = fetched.meta?.logo || (finalCompany && finalCompany !== 'Company' ? `https://logo.clearbit.com/${finalCompany.toLowerCase().replace(/[^a-z0-9]/g, '')}.com` : '');
     const finalLocation = fetched.meta?.location || 'Hybrid';
 
     res.json({
@@ -1611,6 +1691,130 @@ app.post('/api/stop', async (req, res) => {
   currentStatus = 'stopped';
   broadcast('status_change', { status: 'stopped' });
   res.json({ message: 'Stop signal sent successfully.' });
+});
+
+// ─── Vault / Answer Sync API (used by Hamzo Apply extension) ───
+
+// Get all saved answers for extension sync
+app.get('/api/vault/answers', (req, res) => {
+  try {
+    const answers = getAllAnswers();
+    res.json({ answers });
+  } catch (err) {
+    res.status(500).json({ error: err.message || 'Could not read vault answers.' });
+  }
+});
+
+// Save an answer (with consent flag)
+app.post('/api/vault/answers', (req, res) => {
+  try {
+    const { question, answer, approved } = req.body || {};
+    if (!question || answer === undefined) {
+      return res.status(400).json({ error: 'question and answer are required.' });
+    }
+    const result = saveVaultAnswer(question, answer, approved !== false);
+    res.json({ ok: true, saved: Boolean(result) });
+  } catch (err) {
+    res.status(500).json({ error: err.message || 'Could not save vault answer.' });
+  }
+});
+
+// Find a matching saved answer for a question (semantic matching)
+app.post('/api/vault/answers/match', (req, res) => {
+  try {
+    const { question } = req.body || {};
+    if (!question) {
+      return res.status(400).json({ error: 'question is required.' });
+    }
+    const match = findSimilarAnswer(question);
+    res.json({ match: match || null });
+  } catch (err) {
+    res.status(500).json({ error: err.message || 'Could not search vault answers.' });
+  }
+});
+
+// ─── Auto-Apply Engine (DEPRECATED — use Hamzo Apply extension instead) ───
+let activeAutoApply = null;
+
+app.post('/api/auto-apply', async (req, res) => {
+  const { applyUrl, profile, resumeBase64, resumeName, jobTitle, company } = req.body || {};
+
+  if (!applyUrl) {
+    return res.status(400).json({ error: 'applyUrl is required.' });
+  }
+
+  if (activeAutoApply && activeAutoApply.isRunning) {
+    return res.status(409).json({ error: 'Another auto-apply is already in progress. Please wait.' });
+  }
+
+  try {
+    activeAutoApply = new AutoApplyEngine();
+
+    // Broadcast progress via WebSocket
+    activeAutoApply.on('progress', (event) => {
+      broadcast('auto_apply_progress', event);
+    });
+
+    // Broadcast interactive input requirement to frontend modal
+    activeAutoApply.on('input_required', (inputReq) => {
+      broadcast('auto_apply_input_required', inputReq);
+    });
+
+    activeAutoApply.on('complete', (result) => {
+      broadcast('auto_apply_complete', result);
+    });
+
+    // Respond immediately, then run in background
+    res.json({ message: 'Auto-apply started. Watch for progress updates via WebSocket.', status: 'started' });
+
+    // Run auto-apply (this takes time — progress is sent via WebSocket)
+    const result = await activeAutoApply.apply({
+      applyUrl,
+      profile: profile || {},
+      resumeBase64: resumeBase64 || '',
+      resumeName: resumeName || 'hamzo-resume.pdf',
+      jobTitle: jobTitle || '',
+      company: company || '',
+      askAI: askGemini,
+    });
+
+    // Result is already broadcast via WebSocket 'complete' event
+    console.log(`Auto-apply result for ${company}: ${result.status}`);
+  } catch (err) {
+    console.error('Auto-apply error:', err);
+    broadcast('auto_apply_complete', {
+      status: 'failed',
+      message: err.message || 'Auto-apply failed.',
+      filledFields: [],
+      applyUrl,
+      jobTitle,
+      company,
+    });
+  }
+});
+
+// Close auto-apply browser (manual cleanup)
+app.post('/api/auto-apply/close', async (req, res) => {
+  if (activeAutoApply) {
+    await activeAutoApply.close();
+    activeAutoApply = null;
+  }
+  res.json({ ok: true });
+});
+
+// Provide interactive user input (e.g. password, OTP, custom answer)
+app.post('/api/auto-apply/provide-input', (req, res) => {
+  const { inputId, value, saveToVault, domain, fieldKey } = req.body || {};
+  if (!inputId || value === undefined) {
+    return res.status(400).json({ error: 'inputId and value are required.' });
+  }
+
+  if (activeAutoApply) {
+    const success = activeAutoApply.provideUserInput(inputId, value, saveToVault !== false, domain, fieldKey);
+    return res.json({ success, message: success ? 'Input received and applied.' : 'Input request expired or not found.' });
+  }
+
+  res.status(404).json({ error: 'No active auto-apply process.' });
 });
 
 // API 404 Fallback - Always Return JSON

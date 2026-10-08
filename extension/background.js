@@ -1,5 +1,16 @@
+/**
+ * Hamzo Apply — Background Service Worker
+ * Opens job application pages in NEW TABS (not new windows),
+ * injects filler.js, and relays progress/results back to the dashboard.
+ */
+
 const LOCAL_TABS = ['http://localhost:5173/*', 'http://127.0.0.1:5173/*'];
 const APPLY_HOSTS = /greenhouse\.io$|lever\.co$|myworkdayjobs\.com$|ashbyhq\.com$|smartrecruiters\.com$|icims\.com$|workable\.com$|jobvite\.com$|taleo\.net$|successfactors\.com$|oraclecloud\.com$|linkedin\.com$|indeed\.com$/i;
+
+// Track which tab is the Hamzo dashboard
+let dashboardTabId = null;
+// Track which tab is the current job application
+let jobTabId = null;
 
 async function connectOpenHamzoTabs() {
   const tabs = await chrome.tabs.query({ url: LOCAL_TABS });
@@ -10,6 +21,8 @@ async function connectOpenHamzoTabs() {
       injectImmediately: true,
     }).catch(() => {})
   ));
+  // Remember dashboard tab
+  if (tabs.length > 0) dashboardTabId = tabs[0].id;
 }
 
 function hostname(raw) {
@@ -28,12 +41,6 @@ function isErrorUrl(raw) {
 function isApplyHost(raw) {
   const host = hostname(raw);
   return APPLY_HOSTS.test(host) || APPLY_HOSTS.test(host.split('.').slice(-2).join('.')) || /\.greenhouse\.io$|\.lever\.co$|\.ashbyhq\.com$|\.myworkdayjobs\.com$/i.test(host);
-}
-
-function isCompanyMarketingHost(raw) {
-  const host = hostname(raw);
-  if (!host || isApplyHost(raw)) return false;
-  return !/job|board|career|workday|greenhouse|lever|ashby/i.test(host);
 }
 
 function looksLikeJobUrl(raw) {
@@ -80,32 +87,93 @@ async function resolveJobUrl(raw) {
   return start;
 }
 
+// ─── Relay progress from filler.js to dashboard tab ───
+
+function relayToDashboard(type, data) {
+  if (!dashboardTabId) return;
+  chrome.tabs.sendMessage(dashboardTabId, {
+    source: 'hamzo-extension',
+    type,
+    ...data,
+  }).catch(() => {
+    // Dashboard tab may have closed — try to find it again
+    chrome.tabs.query({ url: LOCAL_TABS }, (tabs) => {
+      if (tabs && tabs.length > 0) {
+        dashboardTabId = tabs[0].id;
+        chrome.tabs.sendMessage(dashboardTabId, {
+          source: 'hamzo-extension',
+          type,
+          ...data,
+        }).catch(() => {});
+      }
+    });
+  });
+}
+
+// ─── Lifecycle ───
+
 chrome.runtime.onInstalled.addListener(connectOpenHamzoTabs);
 chrome.runtime.onStartup.addListener(connectOpenHamzoTabs);
 
+// Inject filler.js when a job tab finishes loading
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (changeInfo.status !== 'complete' || !tab.url || /localhost:5173|127\.0\.0\.1:5173/.test(tab.url)) return;
+
+  // Track dashboard tab
+  if (/localhost:5173|127\.0\.0\.1:5173/.test(tab.url)) {
+    dashboardTabId = tabId;
+    return;
+  }
+
   chrome.storage.local.get('pendingApply', ({ pendingApply }) => {
-    if (!pendingApply?.url) return;
-    try {
-      const expected = new URL(pendingApply.url);
-      const current = new URL(tab.url);
-      if (current.hostname !== expected.hostname) return;
-      const job = expected.pathname.match(/job[./][\w.-]+/i)?.[0];
-      const here = current.pathname.match(/job[./][\w.-]+/i)?.[0];
-      if (current.pathname.replace(/\/+$/, '') !== expected.pathname.replace(/\/+$/, '') && job !== here) return;
-      chrome.scripting.executeScript({ target: { tabId }, files: ['filler.js'] }).catch(() => {});
-    } catch {}
+    // Filler self-gates on the page (sameJobPage / adopted flow host), so inject
+    // whenever an unfinished apply exists — covers Apply-click navigations to
+    // new ATS hosts and SPA route changes.
+    if (!pendingApply?.url || pendingApply.done) return;
+    chrome.scripting.executeScript({ target: { tabId }, files: ['filler.js'] }).catch(() => {});
   });
 });
 
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+// ─── Message Handler ───
+
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+
+  // ─── Filler progress relay (from filler.js content script to dashboard) ───
+  if (message?.type === 'HAMZO_FILLER_PROGRESS') {
+    relayToDashboard('HAMZO_APPLY_PROGRESS', {
+      step: message.step,
+      message: message.message,
+      timestamp: message.timestamp,
+      status: message.status,
+      filledCount: message.filledCount,
+      emptyCount: message.emptyCount,
+    });
+
+    // If this is a completion event, also send the dedicated complete message
+    if (message.step === 'complete') {
+      relayToDashboard('HAMZO_APPLY_COMPLETE', {
+        status: message.status || 'needs_attention',
+        message: message.message,
+        filledCount: message.filledCount || 0,
+        emptyCount: message.emptyCount || 0,
+      });
+    }
+    return;
+  }
+
+  // ─── Open job in a NEW TAB (from dashboard via bridge.js) ───
   if (message?.type !== 'HAMZO_OPEN_JOB') return undefined;
+
+  // Remember which tab sent this (the dashboard)
+  if (sender.tab?.id) dashboardTabId = sender.tab.id;
+
   resolveJobUrl(message.url).then((url) => {
     if (isErrorUrl(url)) {
       sendResponse({ ok: false, error: 'That job address is an error page. Paste the Apply URL from the address bar.' });
       return;
     }
+
+    // Store pending apply data including job metadata
     chrome.storage.local.set({
       profile: message.profile || {},
       answers: message.answers || {},
@@ -113,24 +181,27 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         url,
         resumeBase64: message.resumeBase64 || '',
         resumeName: message.resumeName || 'hamzo-resume.pdf',
+        jobTitle: message.jobTitle || '',
+        company: message.company || '',
+        autoSubmit: message.autoSubmit || false,
         startedAt: Date.now(),
       },
     }, () => {
-      chrome.tabs.query({}, (tabs) => {
-        tabs.forEach((tab) => {
-          if (!tab.id || !tab.url || /localhost:5173|127\.0\.0\.1:5173/.test(tab.url)) return;
-          try {
-            const expected = new URL(url);
-            const current = new URL(tab.url);
-            if (current.hostname !== expected.hostname) return;
-            const job = expected.pathname.match(/job[./][\w.-]+/i)?.[0];
-            const here = current.pathname.match(/job[./][\w.-]+/i)?.[0];
-            if (current.pathname.replace(/\/+$/, '') !== expected.pathname.replace(/\/+$/, '') && job !== here) return;
+      // Open in a NEW TAB in the user's CURRENT browser window (not a new window!)
+      chrome.tabs.create({ url, active: true }, (newTab) => {
+        jobTabId = newTab?.id;
+
+        // Also check if there's already a tab open on a related page — inject filler there too
+        // (filler self-gates; unmatched pages exit immediately)
+        chrome.tabs.query({}, (tabs) => {
+          tabs.forEach((tab) => {
+            if (!tab.id || tab.id === newTab?.id || !tab.url || /localhost:5173|127\.0\.0\.1:5173/.test(tab.url)) return;
             chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['filler.js'] }).catch(() => {});
-          } catch {}
+          });
         });
+
+        sendResponse({ ok: true, url });
       });
-      sendResponse({ ok: true, url });
     });
   }).catch((err) => {
     sendResponse({ ok: false, error: err.message || 'Could not open that job.' });
