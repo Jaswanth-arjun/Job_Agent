@@ -20,6 +20,7 @@
   { key: 'linkedin', test: /linkedin/i },
   { key: 'github', test: /github/i },
   { key: 'portfolio', test: /portfolio|website|personal.?url|^url$/i },
+  { key: 'projectLink', test: /project.?(link|url)|link.?(to|of).?(project|work|portfolio|github|demo)|share.*link|deployed/i },
   { key: 'university', test: /university|college|school|institute|alma.?mater|institution/i },
   { key: 'gpa', test: /cgpa|gpa|grade.?point/i },
   { key: 'internship', test: /internship|past.?intern|previous.?intern|intern.?experience/i },
@@ -62,9 +63,15 @@ function profileValue(profile, key, jobTitle, company) {
   const education = profile.education?.[0] || {};
   const internships = profile.experience || profile.internships || [];
   const intern = internships.map((item) => [item.title, item.company, item.dates].filter(Boolean).join(' — ')).filter(Boolean).join('; ');
+  const projects = profile.projects || [];
+  const projectUrl = projects.map((p) => p.link || p.url).find(Boolean)
+    || profile.links?.github || profile.github || profile.links?.portfolio || '';
+  // Phone boxes are often split ("+91" prefix + number-only box): digits only,
+  // last 10 for the number box so a stored "+919440552825" never overflows it.
+  const phoneDigits = String(profile.phone || '').replace(/\D/g, '');
   const map = {
     email: profile.email || '',
-    phone: profile.phone || '',
+    phone: phoneDigits.length > 10 ? phoneDigits.slice(-10) : phoneDigits,
     firstName: first || '',
     lastName: rest.join(' ') || '',
     fullName: name,
@@ -72,6 +79,7 @@ function profileValue(profile, key, jobTitle, company) {
     linkedin: profile.links?.linkedin || profile.linkedin || '',
     github: profile.links?.github || profile.github || '',
     portfolio: profile.links?.portfolio || '',
+    projectLink: projectUrl,
     university: education.school || education.university || '',
     gpa: education.gpa || education.detail || education.score || '',
     internship: intern || '',
@@ -709,16 +717,31 @@ async function fillPage(profile, answers, pending, depth = 0) {
   if (/\/error(\/|$)|\/500(\/|$)/i.test(location.pathname)) return;
 
   const earlyInputs = collectInputs().filter((input) => (input.getAttribute('type') || '') !== 'file');
-  const applyBtn = earlyInputs.length < 3 ? findDescriptionApplyButton() : null;
+  const applyBtns = earlyInputs.length < 3 ? findDescriptionApplyButtons() : [];
 
-  if (applyBtn) {
+  if (applyBtns.length) {
     sendProgress('apply_opening', '📄 Job description page detected. Clicking Apply to open the application form...');
-    const before = location.href;
-    try { applyBtn.scrollIntoView({ behavior: 'smooth', block: 'center' }); } catch {}
-    await new Promise((r) => setTimeout(r, 700));
-    try { applyBtn.click(); } catch {}
+    const clicked = await clickApplyUntilEffect(applyBtns);
+    if (!clicked) {
+      // Clicks had no effect — most sites gate Apply behind candidate login.
+      // Do NOT mark done: the user may click Apply manually, and the DOM watcher
+      // below will auto-start the form fill when the form appears.
+      const wall = detectLoginWall();
+      if (wall) {
+        sendProgress('login_required', '🔐 This job site needs you to log in before applying.');
+        sendProgress('complete', '🔐 Please log in on the job site (candidate login), click Apply yourself — Hamzo will fill the form automatically when it appears.', {
+          status: 'needs_attention', filledCount: 0, emptyCount: 0,
+        });
+      } else {
+        sendProgress('complete', '⚠️ The Apply button is not responding — click Apply yourself, Hamzo will fill the form automatically when it appears.', {
+          status: 'needs_attention', filledCount: 0, emptyCount: 0,
+        });
+      }
+      await updatePending({ awaitingManualApply: true });
+      return;
+    }
     sendProgress('form_wait', '⏳ Application form opening — watching for the next step...');
-    await waitForNextStep(before, 22000);
+    await waitForNextStep(clicked.beforeUrl, 22000);
     await updatePending({ url: location.href, applyClicked: true });
     await new Promise((r) => setTimeout(r, 2500));
     return fillPage(profile, answers, { ...pending, url: location.href, applyClicked: true }, depth + 1);
@@ -737,25 +760,96 @@ function waitForContent() {
   })();
 }
 
-// An "Apply" CTA on a DESCRIPTION page (not a submit inside a form).
-function findDescriptionApplyButton() {
+// All "Apply" CTAs on a DESCRIPTION page (not submits inside a form),
+// ranked: in-viewport + truly visible first (kills hidden-duplicate mis-clicks).
+function findDescriptionApplyButtons() {
   const norm = (s) => String(s || '').replace(/\s+/g, ' ').trim().toLowerCase();
+  const out = [];
   const nodes = [...document.querySelectorAll('button, a, input[type="submit"], input[type="button"], [role="button"]')];
   for (const el of nodes) {
     try {
       if (el.disabled || el.getAttribute('aria-disabled') === 'true') continue;
       const r = el.getBoundingClientRect?.();
       if (!r || !r.width || !r.height) continue;
+      const cs = getComputedStyle(el);
+      if (cs.visibility === 'hidden' || cs.display === 'none' || parseFloat(cs.opacity || '1') < 0.2) continue;
+      if (el.offsetParent === null && cs.position !== 'fixed' && el.tagName !== 'BODY') continue;
       const text = norm(el.innerText || el.value || el.getAttribute('aria-label') || '');
       if (!/^(apply|apply now|apply for this job|apply for job|apply to this job|start application|begin application|continue to apply|proceed to apply|easy apply)$/.test(text)) continue;
       if (/sign in|log in|contact sales|attach file|paste/i.test(text)) continue;
       // A submit button living inside a real form belongs to Phase 2, not here.
       const form = el.closest('form');
       if (form && form.querySelectorAll('input, textarea, select').length >= 3) continue;
-      return el;
+      const inView = r.top >= 0 && r.top <= innerHeight && r.left >= 0 && r.left <= innerWidth;
+      out.push({ el, inView, top: r.top });
+    } catch {}
+  }
+  out.sort((a, b) => (b.inView - a.inView) || (a.top - b.top));
+  return out.map((o) => o.el);
+}
+
+function pageChangedSince(beforeUrl) {
+  if (location.href !== beforeUrl) return true;
+  if (/\/error(\/|$)|\/500(\/|$)/i.test(location.pathname)) return true;
+  if (collectInputs().filter((input) => (input.getAttribute('type') || '') !== 'file').length >= 3) return true;
+  return [...document.querySelectorAll('[role="dialog"], .modal, [class*="modal"], [class*="drawer"]')]
+    .some((m) => m.querySelector('input, textarea, select, button'));
+}
+
+function realClick(el) {
+  try { el.scrollIntoView({ behavior: 'smooth', block: 'center' }); } catch {}
+  return (async () => {
+    await new Promise((r) => setTimeout(r, 600));
+    const r = el.getBoundingClientRect?.();
+    const x = r ? r.left + r.width / 2 : 0;
+    const y = r ? r.top + r.height / 2 : 0;
+    const opts = { bubbles: true, cancelable: true, clientX: x, clientY: y, view: window };
+    try { el.dispatchEvent(new MouseEvent('mouseover', opts)); } catch {}
+    try { el.dispatchEvent(new MouseEvent('mousedown', opts)); } catch {}
+    try { el.focus?.(); } catch {}
+    try { el.dispatchEvent(new MouseEvent('mouseup', opts)); } catch {}
+    try { el.dispatchEvent(new MouseEvent('click', opts)); } catch {}
+    try { el.click(); } catch {}
+  })();
+}
+
+// Click candidates one by one and VERIFY each had an effect (URL/form/modal change).
+// Returns { beforeUrl } on success, null when nothing responded.
+async function clickApplyUntilEffect(candidates) {
+  const tried = new Set();
+  for (const el of candidates.slice(0, 3)) {
+    try {
+      const key = `${el.tagName}:${(el.innerText || el.value || '').slice(0, 30)}`;
+      if (tried.has(key)) continue;
+      tried.add(key);
+      const beforeUrl = location.href;
+      await realClick(el);
+      for (let i = 0; i < 12; i += 1) {
+        await new Promise((r) => setTimeout(r, 500));
+        if (pageChangedSince(beforeUrl)) return { beforeUrl };
+        // Button itself gone / turned into something else counts as an effect too.
+        if (!document.contains(el)) return { beforeUrl };
+      }
+      sendProgress('apply_retry', '↻ That Apply button did not respond — trying the next one...');
     } catch {}
   }
   return null;
+}
+
+// Candidate-login gate: password field or login/register modal on the page.
+function detectLoginWall() {
+  try {
+    const pwVisible = [...document.querySelectorAll('input[type="password"]')].some((el) => {
+      const r = el.getBoundingClientRect?.();
+      return r && r.width && r.height && el.offsetParent !== null;
+    });
+    if (pwVisible) return true;
+    const scopes = [...document.querySelectorAll('[role="dialog"], .modal, [class*="modal"], [class*="login"], [class*="signin"], [class*="auth"]')];
+    if (scopes.some((m) => /sign in|log in|register|create (an )?account|candidate login/i.test(m.innerText || ''))) return true;
+    const body = (document.body?.innerText || '').slice(0, 3000);
+    if (/sign in to apply|log in to apply|please login to continue|create an account to apply/i.test(body)) return true;
+  } catch {}
+  return false;
 }
 
 function waitForNextStep(beforeUrl, ms) {
@@ -1098,5 +1192,24 @@ if (extensionAlive()) {
       }
     } catch {}
   }, 1500);
+  // Manual-Apply watcher: user clicked Apply themselves after the auto-click gave up.
+  // When a real form appears, start filling automatically (no second button press).
+  setInterval(() => {
+    try {
+      if (filling || !extensionAlive()) return;
+      chrome.storage.local.get(['pendingApply'], (stored) => {
+        try {
+          const p = stored?.pendingApply;
+          if (!p?.url || p.done || !p.awaitingManualApply) return;
+          if (!sameJobPage(p.url, p)) return;
+          const n = collectInputs().filter((i) => (i.getAttribute('type') || '') !== 'file').length;
+          if (n >= 3) {
+            sendProgress('form_found', '📄 Application form detected — auto-filling now...');
+            updatePending({ awaitingManualApply: false }).then(() => bootApply());
+          }
+        } catch {}
+      });
+    } catch {}
+  }, 3500);
 }
 })();
